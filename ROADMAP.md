@@ -1,12 +1,17 @@
 # Roadmap
 
-Items listed under "Later" in the project brief, broken into concrete pieces. Nothing here
-is started yet.
+Items listed under "Later" in the project brief, broken into concrete pieces. Ticked items
+are done; everything else is not started.
 
 ## More formats
 
-- [ ] ALB and NLB access logs (space-delimited with quoted fields; parse the request field
-      into method, URL and protocol; findings for 5xx bursts, slow targets, rejected TLS)
+- [x] ALB and NLB access logs (space-delimited with quoted fields; parse the request field
+      into method, URL and protocol; findings for 5xx bursts, slow targets, rejected TLS).
+      Done in `lb.py` and `insights/lblogs.py` with samples `alb_access_logs.log` and
+      `nlb_access_logs.log`. Not covered yet: ALB connection logs (a separate log type
+      with the TLS handshake failures that ALB access logs never record), Classic Load
+      Balancer logs, and path normalisation (`/products/123` and `/products/456` count as
+      two paths in the slow-path tables)
 - [ ] CloudTrail CSV exports (event name, source, user identity, error code; findings for
       access denied bursts and console logins without MFA)
 - [ ] S3 server access logs (bracketed timestamps, quoted request lines; findings for

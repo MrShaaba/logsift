@@ -5,16 +5,19 @@ Drop in a CSV or log file and understand it right away.
 logsift is a small local tool for the moment you open an unfamiliar CSV or log export and
 lose time working out what the columns mean and where the interesting rows are. You drop a
 file in and get a plain-English read of it: what the file is, what each column holds, and,
-for AWS VPC Flow Logs, where traffic is breaking and what looks unusual.
+for AWS VPC Flow Logs and load balancer access logs, where traffic is breaking and what
+looks unusual.
 
 ![logsift showing findings for a VPC Flow Log](docs/screenshot.png)
 
 ## Who it is for
 
-Engineers who get handed a flow log export, a CloudWatch Logs Insights CSV or a random
-data dump and want answers before writing a single query. The case it cares about most is
-VPC Flow Logs: rejected flows, one-way flows, a blocked return path, a port sweep, a noisy
-host, gaps in the capture.
+Engineers who get handed a flow log export, a load balancer access log, a CloudWatch Logs
+Insights CSV or a random data dump and want answers before writing a single query. The
+cases it cares about most are VPC Flow Logs (rejected flows, one-way flows, a blocked return
+path, a port sweep, a noisy host, gaps in the capture) and ALB and NLB access logs (a target
+failing behind a passing health check, a burst of 5xx, a slow endpoint, rejected TLS
+handshakes).
 
 ## What it does
 
@@ -22,8 +25,10 @@ host, gaps in the capture.
   byte order mark and gzip. Shows row and column counts and any parse warnings.
 - **Recognises the format**: generic CSV, VPC Flow Logs in the default version 2 format,
   custom flow-log formats with a header line (fields up to version 5 such as `tcp-flags`,
-  `pkt-srcaddr`, `flow-direction` and `traffic-path`), and CloudWatch Logs Insights exports
-  (flow fields either as parsed columns or inside `@message`).
+  `pkt-srcaddr`, `flow-direction` and `traffic-path`), CloudWatch Logs Insights exports
+  (flow fields either as parsed columns or inside `@message`), Application Load Balancer
+  access logs (every documented field, older files with fewer fields included) and Network
+  Load Balancer TLS access logs.
 - **Profiles every column**: inferred type, count, missing, distinct, min/max/mean/median,
   earliest/latest for dates, top values and a small histogram, with a short "what this
   file looks like" summary on top.
@@ -37,11 +42,27 @@ host, gaps in the capture.
   - one source hitting many ports or hosts in a short window, stated as a fact to look at
   - NODATA and SKIPDATA records, gaps in the time range
   - a timeline of accepted against rejected flows
+- **Finds problems in ALB and NLB access logs** the same way. The request line is split
+  into method, host and path, addresses into IP and port, and TLS alert codes get names:
+  - 5xx by status code, path and target, telling apart errors the target returned from
+    ones the load balancer generated (502, 503, 504)
+  - bursts of server errors, judged against the file's own error rate
+  - a target failing far more of its requests than its siblings while still in rotation,
+    which is what a passing health check in front of a broken process looks like
+  - slow paths and 504 timeouts against the file's own p95, 4xx by status, path and client
+  - one client probing many paths, stated as a fact to look at rather than a verdict
+  - NLB handshakes that never completed, grouped by the TLS alert the client sent, with a
+    likely cause per alert (untrusted chain, rejected certificate, no client hello)
+  - one client churning through hundreds of very short connections
+  - clients still negotiating TLS 1.0 or 1.1, top clients and user agents
+  - a timeline of requests against 5xx, or connections against failed handshakes
 - **Explores** rows in a paginated table with search, a column filter and sorting, and a
   click from any finding straight to its rows.
 - **Exports** findings and filtered rows as CSV, JSON and `.xlsx` (bold frozen header, real
   number and date cells, auto-sized columns).
 - **Writes a self-contained HTML report** from the command line.
+
+![logsift showing findings for an ALB access log](docs/screenshot-alb.png)
 
 Everything runs locally. Nothing is uploaded, there is no telemetry, no accounts and no
 cloud resources. Findings are rules, not models.
@@ -73,8 +94,8 @@ directory overrides for `logsift serve`.
 ## Sample data
 
 `samples/` holds fictional files produced by `scripts/generate_samples.py` (seeded, so the
-output is reproducible). The flow logs cover a two hour window and have known problems
-planted in them:
+output is reproducible). The flow logs and load balancer logs cover the same two hour
+window and have known problems planted in them:
 
 | Problem | Where to look |
 | --- | --- |
@@ -84,10 +105,17 @@ planted in them:
 | `198.51.100.77` sweeping ports 20 to 220 on `10.0.1.10` | "reached 201 different ports" |
 | SYN-only flows to `10.0.2.99:9200` that never complete (custom format only) | "SYN without SYN-ACK" |
 | SKIPDATA and NODATA records, and a 21 minute gap | "SKIPDATA", "NODATA", "gap in the time range" |
+| ALB target `10.0.2.11:8080` returning 502 for twenty minutes behind a passing health check | "Target 10.0.2.11:8080 failed 48% of its requests", "burst of server errors" |
+| ALB endpoint `/api/reports/export` taking seconds and sometimes hitting the 60 s timeout | "slow requests took 2 s or more, 8 timed out" |
+| `198.51.100.77` probing sixty well-known paths on the ALB, plus malformed requests | "tried 60 different paths", "client errors" |
+| An old integration still on TLS 1.1 (`Java/1.7.0_80`) | "still used TLSv1.1" |
+| NLB handshakes aborted with `unknown_ca` and `bad_certificate`, plus plain TCP to the TLS listener | "TLS handshakes failed" |
+| `198.51.100.23` opening 600 connections to the NLB in four minutes | "opened 601 connections in 4 minutes" |
 
 Addresses come from the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
 203.0.113.0/24) and private 10.x space, and the account is the example `123456789012`.
-`daily_sales.csv` is a generic CSV for a made-up coffee shop.
+The load balancer logs use `shop.example.com` and `api.example.com`. `daily_sales.csv` is a
+generic CSV for a made-up coffee shop.
 
 Regenerate with `uv run python scripts/generate_samples.py`.
 
@@ -105,10 +133,11 @@ Layout:
 ```
 src/logsift/
   loader.py       delimiter and header sniffing, typed loading into DuckDB, parse warnings
-  formats.py      format detection and the flow-log field dictionary
+  formats.py      format detection, flow-log field dictionary, ALB and NLB field lists
   flow.py         canonical typed flow table
+  lb.py           typed lb table for ALB and NLB logs, with derived columns
   profile.py      per-column profile and the plain-English summary
-  insights/       rule-based findings for flow logs
+  insights/       rule-based findings: flowlogs.py and lblogs.py
   explore.py      paginated search and filter queries
   export.py       CSV, JSON and .xlsx writers
   report.py       self-contained HTML report
