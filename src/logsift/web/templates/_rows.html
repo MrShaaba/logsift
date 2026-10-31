@@ -1,0 +1,30 @@
+{% set base = "/d/" ~ ds.id ~ "/rows?" ~ qs %}
+<p class="exports muted" style="margin:0 0 8px">Export these {{ page.total | num }} rows{% if page.total > export_limit %} (first {{ export_limit | num }}){% endif %}:
+  <a href="/d/{{ ds.id }}/export/rows.csv?{{ qs }}">CSV</a>
+  <a href="/d/{{ ds.id }}/export/rows.json?{{ qs }}">JSON</a>
+  <a href="/d/{{ ds.id }}/export/rows.xlsx?{{ qs }}">.xlsx</a>
+</p>
+<div class="table-wrap">
+<table class="data">
+  <thead><tr>
+  {% for c in page.columns %}{% if c != 'row_no' %}
+    <th><a href="#" hx-get="{{ base }}&sort={{ c }}&desc={{ 0 if sort == c and desc else 1 }}" hx-target="#rows">{{ c }}{% if sort == c %} {{ '▼' if desc else '▲' }}{% endif %}</a></th>
+  {% endif %}{% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for r in page.rows %}
+    <tr>{% for v in r %}{% if page.columns[loop.index0] != 'row_no' %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(page.columns[loop.index0]) }}</td>{% endif %}{% endfor %}</tr>
+  {% else %}
+    <tr><td colspan="{{ page.columns | length }}" class="muted">No rows match.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<div class="pager">
+  <span>Rows {{ page.first_row | num }} to {{ page.last_row | num }} of {{ page.total | num }}</span>
+  <span class="links">
+    {% if page.page > 1 %}<a href="#" hx-get="{{ base }}&page={{ page.page - 1 }}" hx-target="#rows">← Previous</a>{% endif %}
+    <span>Page {{ page.page }} of {{ page.pages }}</span>
+    {% if page.page < page.pages %}<a href="#" hx-get="{{ base }}&page={{ page.page + 1 }}" hx-target="#rows">Next →</a>{% endif %}
+  </span>
+</div>

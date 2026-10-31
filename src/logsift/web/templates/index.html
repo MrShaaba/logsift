@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}logsift: drop in a file{% endblock %}
+{% block content %}
+<h1>Drop in a CSV or log file and understand it right away</h1>
+<p class="muted">Comma, tab, semicolon, pipe or space delimited, quoted fields, a byte order mark and gzip are all fine. VPC Flow Logs and CloudWatch Logs Insights exports get rule-based findings.</p>
+
+<form id="upload" class="dropzone" action="/upload" method="post" enctype="multipart/form-data">
+  <input type="file" name="file" id="file" accept=".csv,.tsv,.txt,.log,.gz,.psv">
+  <div><strong>Drag a file here</strong> or <a href="#" id="pick">choose one</a></div>
+  <div class="muted" style="margin-top:6px">Files stay on this machine, under <code>{{ data_dir }}</code>.</div>
+  <div class="spinner" id="busy" style="margin-top:10px">Loading…</div>
+</form>
+
+{% if samples %}
+<h2>Or try a sample</h2>
+<div class="card">
+  <ul class="plain">
+  {% for s in samples %}
+    <li>
+      <span><code>{{ s.name }}</code> <span class="muted">{{ s.size | size }}</span></span>
+      <form method="post" action="/load-sample" style="margin:0">
+        <input type="hidden" name="name" value="{{ s.name }}">
+        <button class="btn small secondary" type="submit">Open</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if datasets %}
+<h2>Loaded files</h2>
+<div class="card">
+  <ul class="plain">
+  {% for d in datasets %}
+    <li>
+      <span>
+        <a href="/d/{{ d.id }}"><strong>{{ d.name }}</strong></a>
+        <span class="muted">{{ d.rows | num }} rows, {{ d.columns | length }} columns</span>
+        <span class="pill">{{ d.format.label }}</span>
+      </span>
+      <span>
+        <a class="btn small secondary" href="/d/{{ d.id }}">Overview</a>
+        <a class="btn small secondary" href="/d/{{ d.id }}/explore">Explore</a>
+        <form method="post" action="/d/{{ d.id }}/close" style="display:inline"><button class="btn small danger" type="submit">Close</button></form>
+      </span>
+    </li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var zone = document.getElementById('upload');
+  var input = document.getElementById('file');
+  var busy = document.getElementById('busy');
+  function submit() { busy.style.display = 'inline'; zone.submit(); }
+  document.getElementById('pick').addEventListener('click', function (e) { e.preventDefault(); input.click(); });
+  zone.addEventListener('click', function (e) { if (e.target === zone || e.target.tagName === 'DIV' || e.target.tagName === 'STRONG') input.click(); });
+  input.addEventListener('change', function () { if (input.files.length) submit(); });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    zone.addEventListener(ev, function (e) { e.preventDefault(); zone.classList.remove('over'); });
+  });
+  zone.addEventListener('drop', function (e) {
+    if (e.dataTransfer.files.length) { input.files = e.dataTransfer.files; submit(); }
+  });
+})();
+</script>
+{% endblock %}

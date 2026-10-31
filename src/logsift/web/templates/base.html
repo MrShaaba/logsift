@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}logsift{% endblock %}</title>
+{% if standalone %}
+<style>{{ css | safe }}</style>
+{% else %}
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+{% endif %}
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="{% if standalone %}#{% else %}/{% endif %}">log<span>sift</span></a>
+  {% if not standalone %}
+  <nav>
+    <a href="/" class="{% if nav == 'home' %}active{% endif %}">Files</a>
+    {% if ds %}
+    <a href="/d/{{ ds.id }}" class="{% if nav == 'overview' %}active{% endif %}">Overview</a>
+    <a href="/d/{{ ds.id }}/explore" class="{% if nav == 'explore' %}active{% endif %}">Explore</a>
+    {% endif %}
+  </nav>
+  {% endif %}
+  {% if ds %}<span class="muted mono" style="margin-left:auto">{{ ds.name }}</span>{% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+<footer>Everything runs locally. Nothing is uploaded and no model is involved; every finding is a rule.</footer>
+</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

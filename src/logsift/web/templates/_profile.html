@@ -1,0 +1,35 @@
+<div class="grid cols-4">
+{% for c in profile.columns %}
+  <div class="card profile-card">
+    <div><span class="name">{{ c.name }}</span><span class="kind">{{ c.kind }}</span></div>
+    {% if c.histogram %}
+    <svg class="hist" viewBox="0 0 140 30" width="100%" height="30" preserveAspectRatio="none" style="margin-top:6px">
+      {% for b in histogram_bars(c.histogram) %}<rect x="{{ '%.1f' % b.x }}" y="{{ '%.1f' % b.y }}" width="{{ '%.1f' % b.w }}" height="{{ '%.1f' % b.h }}"><title>{{ b.label }}</title></rect>{% endfor %}
+    </svg>
+    {% if c.is_numeric or c.is_temporal %}<div class="muted" style="display:flex;justify-content:space-between;font-size:11px"><span>{{ c.hist_labels[0] }}</span><span>{{ c.hist_labels[1] }}</span></div>{% endif %}
+    {% endif %}
+    <dl>
+      <dt>count</dt><dd>{{ c.count | num }}</dd>
+      <dt>missing</dt><dd>{{ c.missing | num }} ({{ c.missing_label }})</dd>
+      <dt>distinct</dt><dd>{{ c.distinct | num }}</dd>
+      {% if c.is_numeric %}
+      <dt>min</dt><dd>{{ c.min | cell }}</dd>
+      <dt>max</dt><dd>{{ c.max | cell }}</dd>
+      <dt>mean</dt><dd>{{ c.mean | cell }}</dd>
+      <dt>median</dt><dd>{{ c.median | cell }}</dd>
+      {% elif c.is_temporal %}
+      <dt>earliest</dt><dd>{{ c.min | cell }}</dd>
+      <dt>latest</dt><dd>{{ c.max | cell }}</dd>
+      {% elif c.kind == 'text' and c.min is not none %}
+      <dt>length</dt><dd>{{ c.min }} to {{ c.max }}</dd>
+      {% endif %}
+    </dl>
+    {% if c.top %}
+    <div class="top">
+      <div class="muted">top values</div>
+      {% for v, n in c.top[:5] %}<div><span class="v" title="{{ v }}">{{ v if v else '(empty)' }}</span><span class="muted">{{ n | num }}</span></div>{% endfor %}
+    </div>
+    {% endif %}
+  </div>
+{% endfor %}
+</div>

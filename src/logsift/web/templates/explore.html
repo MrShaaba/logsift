@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Explore {{ ds.name }}: logsift{% endblock %}
+{% block content %}
+<h1>Explore <span class="muted" style="font-weight:400">{{ ds.name }}</span></h1>
+{% if finding %}
+<div class="active-filter">Showing the rows behind <strong>{{ finding.title }}</strong>. <a href="/d/{{ ds.id }}/explore">Clear</a> · <a href="/d/{{ ds.id }}#finding-{{ finding.id }}">Back to the finding</a></div>
+{% endif %}
+<form class="filters" method="get" action="/d/{{ ds.id }}/explore"
+      hx-get="/d/{{ ds.id }}/rows" hx-target="#rows" hx-push-url="false" hx-trigger="submit, change from:select">
+  {% if finding %}<input type="hidden" name="finding" value="{{ finding.id }}">{% endif %}
+  <label>Search all columns <input type="search" name="q" value="{{ rq.search }}" placeholder="e.g. REJECT or 10.0.3.20"></label>
+  <label>Filter column
+    <select name="col">
+      <option value="">any</option>
+      {% for name, _ in ds.columns %}<option value="{{ name }}" {% if name == filter_col %}selected{% endif %}>{{ name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>equals <input type="text" name="val" value="{{ filter_val }}" placeholder="exact value"></label>
+  <button class="btn" type="submit">Apply</button>
+  <a class="btn secondary" href="/d/{{ ds.id }}/explore">Reset</a>
+  <span class="spinner">Loading…</span>
+</form>
+<div id="rows">{% include "_rows.html" %}</div>
+{% endblock %}

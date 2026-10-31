@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ ds.name }}: logsift report{% endblock %}
+{% block content %}
+<h1>{{ ds.name }}</h1>
+<p class="muted">
+  <span class="badge soft">{{ ds.format.label }}</span>
+  {{ ds.sniff.delimiter_name }}-delimited{% if ds.sniff.has_header %}, header row{% else %}, no header row{% endif %}{% if ds.sniff.gzip %}, gzip{% endif %}.
+  Report written {{ generated }} by logsift {{ version }}.
+</p>
+<div class="grid cols-4" style="margin-top:12px">
+  <div class="card stat"><span class="label">Rows</span><span class="value">{{ ds.rows | num }}</span></div>
+  <div class="card stat"><span class="label">Columns</span><span class="value">{{ ds.columns | length }}</span></div>
+  <div class="card stat"><span class="label">File size</span><span class="value">{{ ds.size_bytes | size }}</span></div>
+  <div class="card stat"><span class="label">Parse warnings</span><span class="value">{{ ds.load.warnings | length }}</span></div>
+</div>
+{% if ds.load.warnings %}<div class="notice"><strong>Parse warnings</strong><ul>{% for w in ds.load.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
+{% if ds.load.notes %}<div class="notice info"><ul>{% for n in ds.load.notes %}<li>{{ n }}</li>{% endfor %}</ul></div>{% endif %}
+
+<h2>What this file looks like</h2>
+<div class="card"><ul class="summary" style="margin:0;padding-left:18px">{% for line in profile.summary %}<li>{{ line }}</li>{% endfor %}</ul></div>
+
+{% if ds.is_flow_log %}
+<h2>Findings <span class="muted" style="font-weight:400;font-size:14px">{{ findings | length }} rules fired</span></h2>
+{% include "_findings.html" %}
+{% endif %}
+
+<h2>Columns</h2>
+{% include "_profile.html" %}
+
+<h2>First {{ sample.rows | length }} rows</h2>
+<div class="table-wrap">
+<table class="data">
+  <thead><tr>{% for c in sample.columns %}{% if c != 'row_no' %}<th>{{ c }}</th>{% endif %}{% endfor %}</tr></thead>
+  <tbody>{% for r in sample.rows %}<tr>{% for v in r %}{% if sample.columns[loop.index0] != 'row_no' %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(sample.columns[loop.index0]) }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody>
+</table>
+</div>
+{% endblock %}

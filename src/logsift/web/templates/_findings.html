@@ -1,0 +1,53 @@
+{% if timeline %}
+{% set g = timeline_geometry(timeline) %}
+<div class="card" style="margin-bottom:14px">
+  <h3 style="margin-top:0">Accepted against rejected flows, per {{ g.bucket }}</h3>
+  <div class="legend"><span><i style="background:var(--ok)"></i>accepted</span><span><i style="background:var(--bad)"></i>rejected</span><span class="muted">peak {{ g.max_value | num }} flows</span></div>
+  <svg class="timeline" viewBox="0 0 {{ g.width }} {{ g.height }}" width="100%" preserveAspectRatio="none" style="height:{{ g.height }}px" role="img" aria-label="timeline of accepted and rejected flows">
+    <line x1="40" y1="{{ g.height - 24 }}" x2="{{ g.width }}" y2="{{ g.height - 24 }}"/>
+    <text x="0" y="14">{{ g.max_value | num }}</text>
+    <text x="0" y="{{ g.height - 28 }}">0</text>
+    {% for b in g.accepted %}<rect class="acc" x="{{ '%.1f' % b.x }}" y="{{ '%.1f' % b.y }}" width="{{ '%.1f' % b.w }}" height="{{ '%.1f' % b.h }}"><title>{{ b.label }}</title></rect>{% endfor %}
+    {% for b in g.rejected %}<rect class="rej" x="{{ '%.1f' % b.x }}" y="{{ '%.1f' % b.y }}" width="{{ '%.1f' % b.w }}" height="{{ '%.1f' % b.h }}"><title>{{ b.label }}</title></rect>{% endfor %}
+    {% for x, label in g.ticks %}<text x="{{ '%.1f' % x }}" y="{{ g.height - 8 }}" text-anchor="middle">{{ label }}</text>{% endfor %}
+  </svg>
+</div>
+{% endif %}
+
+{% for f in findings %}
+<div class="card finding {{ f.severity }}" id="finding-{{ f.id }}" style="margin-bottom:12px">
+  <h3><span class="badge {{ f.severity }}">{{ f.severity }}</span> {{ f.title }}</h3>
+  <p style="margin:4px 0">{{ f.summary }}</p>
+  {% if f.explanation %}<p class="muted" style="margin:4px 0">{{ f.explanation }}</p>{% endif %}
+  {% if f.likely_cause %}<div class="cause"><b>Likely cause:</b> {{ f.likely_cause }}</div>{% endif %}
+  <p class="meta" style="margin:8px 0 0">
+    {% if f.row_count %}
+      {% if standalone %}{{ f.row_count | num }} rows behind this finding{% else %}<a href="/d/{{ ds.id }}/explore?finding={{ f.id }}">Show the {{ f.row_count | num }} rows behind this finding</a>{% endif %}
+    {% else %}No rows to show{% endif %}
+  </p>
+  {% for t in f.tables %}
+  <details {% if loop.first and f.severity in ('high', 'medium') %}open{% endif %}>
+    <summary>{{ t.title }} ({{ t.rows | length }})</summary>
+    <div class="table-wrap" style="margin-top:6px">
+    <table class="data">
+      <thead><tr>{% for c in t.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for r in t.rows %}<tr>{% for v in r %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(t.columns[loop.index0]) }}</td>{% endfor %}</tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  {% endfor %}
+  {% if standalone and f.sample_rows %}
+  <details>
+    <summary>First {{ f.sample_rows.rows | length }} of {{ f.row_count | num }} rows</summary>
+    <div class="table-wrap" style="margin-top:6px">
+    <table class="data">
+      <thead><tr>{% for c in f.sample_rows.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+      <tbody>{% for r in f.sample_rows.rows %}<tr>{% for v in r %}{% if f.sample_rows.columns[loop.index0] != 'row_no' %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(f.sample_rows.columns[loop.index0]) }}</td>{% endif %}{% endfor %}</tr>{% endfor %}</tbody>
+    </table>
+    </div>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
