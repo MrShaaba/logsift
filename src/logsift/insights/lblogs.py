@@ -83,7 +83,9 @@ def make_context(ds: Dataset) -> Context:
 
 
 def plural(n: int, word: str) -> str:
-    return f"{n:,} {word}{'' if n == 1 else 's'}"
+    if n == 1:
+        return f"{n:,} {word}"
+    return f"{n:,} {word}{'es' if word.endswith('s') else 's'}"
 
 
 def span(first: datetime | None, last: datetime | None) -> str:

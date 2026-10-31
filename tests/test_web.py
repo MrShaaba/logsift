@@ -117,3 +117,21 @@ def test_nlb_overview(client: TestClient) -> None:
     assert "Network Load Balancer access log" in page.text
     assert "Completed connections against failed TLS handshakes" in page.text
     assert "190 TLS handshakes failed" in page.text
+
+
+def test_cloudtrail_overview_explore_and_export(client: TestClient) -> None:
+    r = client.post("/load-sample", data={"name": "cloudtrail_events.csv"}, follow_redirects=False)
+    url = r.headers["location"]
+    page = client.get(url)
+    assert page.status_code == 200
+    assert "CloudTrail event export" in page.text
+    assert "API calls against errors, per minute" in page.text
+    assert "bob was refused 220 calls in 6 minutes across 22 different actions" in page.text
+    assert "3 console sign-ins without MFA, 1 by the root account" in page.text
+    r = client.get(f"{url}/explore?finding=denied-burst-1")
+    assert r.status_code == 200 and "of 220" in r.text
+    r = client.get(f"{url}/rows?col=principal&val=root&sort=event_time")
+    assert "of 11" in r.text
+    rows = client.get(f"{url}/export/rows.csv?finding=console-mfa").text.splitlines()
+    assert len(rows) == 4 and rows[0].startswith("event_time,event_name,service,principal")
+    assert client.get(f"{url}/export/findings.xlsx").status_code == 200

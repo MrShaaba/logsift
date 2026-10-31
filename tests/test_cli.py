@@ -46,3 +46,12 @@ def test_report_default_name(samples: Path, tmp_path: Path) -> None:
 def test_missing_file(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     assert main(["report", str(tmp_path / "nope.csv")]) == 2
     assert "not a file" in capsys.readouterr().err
+
+
+def test_inspect_cloudtrail_export(samples: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["inspect", str(samples / "cloudtrail_events.csv"), "-v"]) == 0
+    out = capsys.readouterr().out
+    assert "CloudTrail event export" in out
+    assert "[HIGH  ] The root account made 11 calls, 4 of them changes" in out
+    assert "[MEDIUM] shop-web-role was refused 181 calls in 30 minutes" in out
+    assert "Likely cause: Resources appearing in a region nobody works in" in out

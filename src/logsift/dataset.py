@@ -88,7 +88,7 @@ class Dataset:
 
     @property
     def has_rules(self) -> bool:
-        return self.is_flow_log or self.is_lb_log  # CloudTrail rules come next
+        return self.is_flow_log or self.is_lb_log or self.is_trail_log
 
     @property
     def rows(self) -> int:
@@ -112,6 +112,8 @@ class Dataset:
             from logsift.insights.flowlogs import run_rules
         elif self.is_lb_log:
             from logsift.insights.lblogs import run_rules
+        elif self.is_trail_log:
+            from logsift.insights.cloudtrail import run_rules
         else:
             return []
         return run_rules(self)
@@ -122,6 +124,8 @@ class Dataset:
             from logsift.insights.flowlogs import build_timeline
         elif self.is_lb_log:
             from logsift.insights.lblogs import build_timeline
+        elif self.is_trail_log:
+            from logsift.insights.cloudtrail import build_timeline
         else:
             return None
         return build_timeline(self)

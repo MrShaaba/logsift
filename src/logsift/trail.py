@@ -104,6 +104,7 @@ RE_ERROR_MESSAGE = r'"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"'
 RE_USER_AGENT = r'"userAgent"\s*:\s*"((?:[^"\\]|\\.)*)"'
 RE_SOURCE_IP = r'"sourceIPAddress"\s*:\s*"([^"]+)"'
 RE_REGION = r'"awsRegion"\s*:\s*"([^"]+)"'
+RE_READ_ONLY = r'"readOnly"\s*:\s*"?(true|false)'
 
 
 def boolish(expr: str) -> str:
@@ -129,10 +130,11 @@ def flag(col: str, pattern: str, truthy: str) -> str:
     return "NULL" if found == "NULL" else f"(lower({found}) = '{truthy.lower()}')"
 
 
-def first_of(*exprs: str) -> str:
+def first_of(*exprs: str, sql_type: str = "VARCHAR") -> str:
+    """coalesce() of the expressions that exist; a typed NULL when none of them do."""
     live = [e for e in exprs if e != "NULL"]
     if not live:
-        return "NULL"
+        return f"CAST(NULL AS {sql_type})"
     return live[0] if len(live) == 1 else f"coalesce({', '.join(live)})"
 
 
@@ -151,6 +153,10 @@ def trail_derived(available: set[str]) -> list[list[tuple[str, str]]]:
         ("source_ip", first_of(plain("source_ip"), extract(record, RE_SOURCE_IP))),
         ("user_agent", first_of(plain("user_agent"), extract(record, RE_USER_AGENT))),
         ("error_message", first_of(plain("error_message"), extract(record, RE_ERROR_MESSAGE))),
+        (
+            "read_only",
+            first_of(plain("read_only"), flag(record, RE_READ_ONLY, "true"), sql_type="BOOLEAN"),
+        ),
         (
             "identity_type",
             first_of(
@@ -180,6 +186,7 @@ def trail_derived(available: set[str]) -> list[list[tuple[str, str]]]:
                 flag(record, RE_MFA_USED, "Yes"),
                 flag(identity, RE_MFA_AUTH, "true"),
                 flag(record, RE_MFA_AUTH, "true"),
+                sql_type="BOOLEAN",
             ),
         ),
         ("login_result", first_of(extract(response, RE_LOGIN), extract(record, RE_LOGIN))),
