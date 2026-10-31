@@ -46,6 +46,11 @@ def nlb_ds() -> Dataset:
     return Dataset.open(SAMPLES / "nlb_access_logs.log")
 
 
+@pytest.fixture(scope="session")
+def trail_ds() -> Dataset:
+    return Dataset.open(SAMPLES / "cloudtrail_events.csv")
+
+
 def write(tmp_path: Path, name: str, text: str, *, bom: bool = False, gz: bool = False) -> Path:
     data = text.encode("utf-8")
     if bom:

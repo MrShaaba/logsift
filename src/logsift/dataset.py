@@ -16,6 +16,7 @@ from logsift.formats import FormatInfo, detect_format
 from logsift.lb import build_lb_table
 from logsift.loader import LoadResult, Sniff, load, sniff
 from logsift.profile import Profile, profile_table
+from logsift.trail import build_trail_table
 
 if TYPE_CHECKING:
     from logsift.insights.base import Finding
@@ -31,7 +32,8 @@ class Dataset:
     sniff: Sniff
     format: FormatInfo
     load: LoadResult
-    # "flow" for VPC Flow Logs, "lb" for ALB and NLB access logs, otherwise "raw".
+    # "flow" for VPC Flow Logs, "lb" for ALB and NLB access logs, "trail" for CloudTrail
+    # exports, otherwise "raw".
     table: str
     canonical_columns: list[str] = field(default_factory=list)
     build_error: str = ""
@@ -55,15 +57,21 @@ class Dataset:
             load=result,
             table="raw",
         )
-        builder = build_flow_table if fmt.is_flow_log else build_lb_table if fmt.is_lb_log else None
-        if builder is not None:
-            name = "flow" if fmt.is_flow_log else "lb"
+        builders = {
+            "flow": build_flow_table if fmt.is_flow_log else None,
+            "lb": build_lb_table if fmt.is_lb_log else None,
+            "trail": build_trail_table if fmt.is_trail_log else None,
+        }
+        for name, builder in builders.items():
+            if builder is None:
+                continue
             try:
                 ds.canonical_columns = builder(con, fmt, "raw", name)
                 ds.table = name
             except duckdb.Error as exc:  # pragma: no cover - defensive
                 ds.build_error = str(exc).splitlines()[0]
                 ds.load.warnings.append(f"Could not build the {name} table: {ds.build_error}")
+            break
         return ds
 
     @property
@@ -75,8 +83,12 @@ class Dataset:
         return self.table == "lb"
 
     @property
+    def is_trail_log(self) -> bool:
+        return self.table == "trail"
+
+    @property
     def has_rules(self) -> bool:
-        return self.is_flow_log or self.is_lb_log
+        return self.is_flow_log or self.is_lb_log  # CloudTrail rules come next
 
     @property
     def rows(self) -> int:

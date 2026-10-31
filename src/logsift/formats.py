@@ -16,6 +16,7 @@ class Format(StrEnum):
     CW_INSIGHTS = "cloudwatch_insights"
     ALB = "alb_access"
     NLB = "nlb_access"
+    CLOUDTRAIL = "cloudtrail_csv"
 
 
 LABELS = {
@@ -25,6 +26,7 @@ LABELS = {
     Format.CW_INSIGHTS: "CloudWatch Logs Insights export",
     Format.ALB: "Application Load Balancer access log",
     Format.NLB: "Network Load Balancer access log",
+    Format.CLOUDTRAIL: "CloudTrail event export",
 }
 
 # Canonical flow-log field names (underscored) keyed by their squashed spelling.
@@ -154,6 +156,57 @@ NLB_FIELDS = [
 ]
 NLB_MIN_FIELDS = 18
 
+# CloudTrail CSV columns keyed by their squashed spelling. The console's event history
+# download uses "Event name", a CloudTrail Lake or Athena result uses eventName or
+# eventname, and flattened Lake columns such as userIdentity.type squash the same way.
+TRAIL_FIELDS: dict[str, str] = {
+    "eventid": "event_id",
+    "eventtime": "event_time",
+    "eventname": "event_name",
+    "eventsource": "event_source",
+    "username": "user_name",
+    "useridentityusername": "user_name",
+    "awsregion": "aws_region",
+    "region": "aws_region",
+    "sourceipaddress": "source_ip",
+    "sourceip": "source_ip",
+    "errorcode": "error_code",
+    "errormessage": "error_message",
+    "readonly": "read_only",
+    "accesskeyid": "access_key_id",
+    "useridentityaccesskeyid": "access_key_id",
+    "eventtype": "event_type",
+    "requestid": "request_id",
+    "eventcategory": "event_category",
+    "recipientaccountid": "recipient_account_id",
+    "resources": "resources",
+    "resourcetype": "resource_type",
+    "resourcename": "resource_name",
+    "useragent": "user_agent",
+    "useridentity": "user_identity",
+    "useridentitytype": "identity_type",
+    "usertype": "identity_type",
+    "identitytype": "identity_type",
+    "useridentityarn": "identity_arn",
+    "userarn": "identity_arn",
+    "identityarn": "identity_arn",
+    "useridentityprincipalid": "principal_id",
+    "principalid": "principal_id",
+    "useridentityaccountid": "identity_account_id",
+    "useridentitysessioncontextattributesmfaauthenticated": "mfa_authenticated",
+    "mfaauthenticated": "mfa_authenticated",
+    "mfaused": "mfa_used",
+    "additionaleventdata": "additional_event_data",
+    "requestparameters": "request_parameters",
+    "responseelements": "response_elements",
+    "cloudtrailevent": "event_json",
+    "eventrecord": "event_json",
+    "rawevent": "event_json",
+    "eventjson": "event_json",
+    "record": "event_json",
+}
+TRAIL_REQUIRED = {"event_time", "event_name", "event_source"}
+
 ACTIONS = {"ACCEPT", "REJECT", "-"}
 STATUSES = {"OK", "NODATA", "SKIPDATA"}
 ENI_RE = re.compile(r"^eni-[0-9a-f]{8,17}$")
@@ -172,6 +225,8 @@ class FormatInfo:
     message_column: str = ""
     # Raw column name -> load balancer field name, for ALB and NLB access logs.
     lb_columns: dict[str, str] = field(default_factory=dict)
+    # Raw column name -> CloudTrail field name (or the raw name when it is not a known one).
+    trail_columns: dict[str, str] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -187,8 +242,12 @@ class FormatInfo:
         return self.kind in (Format.ALB, Format.NLB)
 
     @property
+    def is_trail_log(self) -> bool:
+        return self.kind == Format.CLOUDTRAIL
+
+    @property
     def has_rules(self) -> bool:
-        return self.is_flow_log or self.is_lb_log
+        return self.is_flow_log or self.is_lb_log or self.is_trail_log
 
     @property
     def dash_means_missing(self) -> bool:
@@ -246,6 +305,27 @@ def mostly(checks: list[bool]) -> bool:
     return bool(checks) and sum(checks) / len(checks) >= 0.8
 
 
+def trail_mapping(cols: list[str]) -> dict[str, str]:
+    """Map header names onto CloudTrail field names; unknown columns keep their own name."""
+    out: dict[str, str] = {}
+    taken: set[str] = set()
+    for raw in cols:
+        name = TRAIL_FIELDS.get(squash(raw), raw)
+        if name in taken:
+            name = raw
+        taken.add(name)
+        out[raw] = name
+    return out
+
+
+def looks_like_cloudtrail(sn: Sniff, mapping: dict[str, str]) -> bool:
+    if not TRAIL_REQUIRED.issubset(mapping.values()):
+        return False
+    idx = [i for i, raw in enumerate(sn.columns) if mapping[raw] == "event_source"][0]
+    sources = [r[idx] for r in sn.rows if idx < len(r) and r[idx]]
+    return mostly([s.endswith(("amazonaws.com", "amazonaws.com.cn")) for s in sources])
+
+
 def detect_format(sn: Sniff) -> FormatInfo:
     """Work out which format the sniffed file is in."""
     cols = sn.columns
@@ -286,6 +366,16 @@ def detect_format(sn: Sniff) -> FormatInfo:
             info.flow_columns = {k: v for k, v in mapped.items() if v}
             info.reasons.append("parsed fields include VPC Flow Log columns")
         return info
+
+    if sn.has_header:
+        mapping = trail_mapping(cols)
+        if looks_like_cloudtrail(sn, mapping):
+            info = FormatInfo(Format.CLOUDTRAIL, trail_columns=mapping)
+            known = sum(1 for raw, name in mapping.items() if name != raw)
+            info.reasons.append(
+                f"header names {known} CloudTrail fields and every event source is an AWS service"
+            )
+            return info
 
     if not sn.has_header and sn.delimiter == " " and len(cols) == 14:
         checked = [looks_like_v2_line(r) for r in sn.rows]

@@ -17,6 +17,7 @@ def test_sample_formats(samples: Path) -> None:
         "daily_sales.csv": Format.GENERIC,
         "alb_access_logs.log": Format.ALB,
         "nlb_access_logs.log": Format.NLB,
+        "cloudtrail_events.csv": Format.CLOUDTRAIL,
     }
     for name, kind in expect.items():
         info = detect_format(sniff(samples / name))
@@ -133,3 +134,66 @@ def test_canonical_names() -> None:
     assert canonical("interfaceId") == "interface_id"
     assert canonical("log_status") == "log_status"
     assert canonical("revenue") is None
+
+
+def test_cloudtrail_console_export_maps_header_names(samples: Path) -> None:
+    info = detect_format(sniff(samples / "cloudtrail_events.csv"))
+    assert info.is_trail_log and info.has_rules and not info.is_lb_log
+    assert not info.dash_means_missing
+    cols = info.trail_columns
+    assert cols["Event time"] == "event_time"
+    assert cols["Event name"] == "event_name"
+    assert cols["Source IP address"] == "source_ip"
+    assert cols["Read-only"] == "read_only"
+    assert cols["CloudTrail event"] == "event_json"
+    assert "18 CloudTrail fields" in info.reasons[0]
+
+
+ATHENA_HEADER = (
+    "eventversion,useridentity,eventtime,eventsource,eventname,awsregion,sourceipaddress,"
+    "useragent,errorcode,errormessage,readonly,eventid"
+)
+
+
+def athena_line(i: int, name: str = "DescribeInstances", error: str = "") -> str:
+    identity = (
+        "{type=AssumedRole, principalid=AROAEXAMPLE:app, arn=arn:aws:sts::123456789012:"
+        "assumed-role/app-role/app, accountid=123456789012, sessioncontext={attributes="
+        "{mfaauthenticated=false}}}"
+    )
+    return (
+        f'1.10,"{identity}",2026-03-10T08:0{i}:00Z,ec2.amazonaws.com,{name},eu-west-1,'
+        f"10.0.1.{i},aws-cli/2.15.30,{error},,true,e{i}\n"
+    )
+
+
+def test_cloudtrail_athena_result_is_recognised(tmp_path: Path) -> None:
+    text = ATHENA_HEADER + "\n" + "".join(athena_line(i) for i in range(9))
+    info = detect_format(sniff(write(tmp_path, "athena.csv", text)))
+    assert info.kind == Format.CLOUDTRAIL
+    assert info.trail_columns["useridentity"] == "user_identity"
+    assert info.trail_columns["sourceipaddress"] == "source_ip"
+    assert info.trail_columns["eventversion"] == "eventversion"  # unknown columns keep their name
+
+
+def test_cloudtrail_lake_flattened_columns(tmp_path: Path) -> None:
+    text = (
+        "eventTime,eventName,eventSource,awsRegion,userIdentity.type,userIdentity.arn\n"
+        + "".join(
+            f"2026-03-10T08:0{i}:00Z,ListBuckets,s3.amazonaws.com,eu-west-1,IAMUser,"
+            f"arn:aws:iam::123456789012:user/alice\n"
+            for i in range(9)
+        )
+    )
+    info = detect_format(sniff(write(tmp_path, "lake.csv", text)))
+    assert info.kind == Format.CLOUDTRAIL
+    assert info.trail_columns["userIdentity.type"] == "identity_type"
+    assert info.trail_columns["userIdentity.arn"] == "identity_arn"
+
+
+def test_event_columns_without_aws_sources_stay_generic(tmp_path: Path) -> None:
+    text = "Event name,Event time,Event source\n" + "".join(
+        f"Standup,2026-03-10T08:0{i}:00Z,calendar\n" for i in range(9)
+    )
+    info = detect_format(sniff(write(tmp_path, "cal.csv", text)))
+    assert info.kind == Format.GENERIC
