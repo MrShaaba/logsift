@@ -12,8 +12,13 @@ are done; everything else is not started.
       with the TLS handshake failures that ALB access logs never record), Classic Load
       Balancer logs, and path normalisation (`/products/123` and `/products/456` count as
       two paths in the slow-path tables)
-- [ ] CloudTrail CSV exports (event name, source, user identity, error code; findings for
-      access denied bursts and console logins without MFA)
+- [x] CloudTrail CSV exports (event name, source, user identity, error code; findings for
+      access denied bursts and console logins without MFA). Done in `trail.py` and
+      `insights/cloudtrail.py` with the sample `cloudtrail_events.csv`, plus root activity
+      and rarely used regions. Not covered yet: the JSON download and raw trail files
+      from S3 (gzipped JSON with a `Records` array), data events such as S3 object reads,
+      failed console sign-in bursts as their own finding, and a baseline of "normal"
+      regions and addresses learned from a longer file rather than from the file itself
 - [ ] S3 server access logs (bracketed timestamps, quoted request lines; findings for
       4xx by key prefix and anonymous access)
 - [ ] Route 53 Resolver query logs (JSON lines and CSV; findings for NXDOMAIN bursts and
