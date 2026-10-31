@@ -23,6 +23,15 @@ Planted problems in the load balancer logs (see ``LB_PLANTED``):
 * ALB: an old integration still negotiating TLS 1.1
 * NLB: TLS handshakes aborted by clients (unknown CA, bad certificate, no client hello)
 * NLB: one client opening hundreds of very short connections in four minutes
+
+Planted problems in the CloudTrail export (see ``TRAIL_PLANTED``):
+
+* one IAM user's access key used from an unknown address to try two dozen actions,
+  nearly all denied, which is what testing a stolen key looks like
+* the web tier's role denied one SSM parameter every thirty seconds, a steady retry loop
+* console sign-ins without MFA, one of them by the root account
+* root creating an administrator user and an access key for it
+* that new user launching GPU instances in two regions the account never uses
 """
 
 from __future__ import annotations
@@ -30,8 +39,11 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import hashlib
+import json
 import math
 import random
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1285,6 +1297,900 @@ def write_nlb(out: Path, rng: random.Random) -> None:
     (out / "nlb_access_logs.log").write_text("\n".join(lines) + "\n")
 
 
+# ------------------------------------------------------------ CloudTrail events
+
+TRAIL_PLANTED = {
+    "denied_enumeration": {"user": "bob", "ip": "203.0.113.77", "window": ("08:52", "08:58")},
+    "denied_retry_loop": {
+        "role": "shop-web-role",
+        "action": "ssm:GetParameter",
+        "parameter": "/shop/web/feature-flags",
+        "window": ("09:30", "10:00"),
+    },
+    "console_no_mfa": {"users": ["carol", "root"]},
+    "root_activity": {"ip": "203.0.113.61", "window": ("09:12", "09:21")},
+    "unusual_regions": {"user": "backup-admin", "regions": ["ap-southeast-1", "us-east-2"]},
+}
+
+TRAIL_HEADER = [
+    "Event ID",
+    "Event time",
+    "User name",
+    "Event name",
+    "Event source",
+    "Resource type",
+    "Resource name",
+    "AWS region",
+    "Source IP address",
+    "Error code",
+    "Read-only",
+    "Access key ID",
+    "Event type",
+    "Request ID",
+    "Event category",
+    "Recipient account ID",
+    "Resources",
+    "CloudTrail event",
+]
+
+HOME_REGION = REGION  # eu-west-1
+DR_REGION = "eu-central-1"
+GLOBAL_REGION = "us-east-1"  # IAM, STS global endpoint and console sign-in events land here
+
+CLI_AGENT = "aws-cli/2.15.30 Python/3.11.8 Linux/6.5.0-1016-aws exe/x86_64.ubuntu.22 prompt/off"
+SDK_AGENT = (
+    "aws-sdk-java/2.25.16 Linux/6.1.79-99.167.amzn2023.x86_64 "
+    "OpenJDK_64-Bit_Server_VM/17.0.10+7-LTS Java/17.0.10 vendor/Amazon.com_Inc."
+)
+BOTO_AGENT = (
+    "Boto3/1.34.84 md/Botocore#1.34.84 ua/2.0 os/linux#6.5.0 md/arch#x86_64 "
+    "lang/python#3.11.8 md/pyimpl#CPython cfg/retry-mode#legacy Botocore/1.34.84"
+)
+MAC_BROWSER = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+WIN_BROWSER = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+GITHUB_AGENT = "aws-cli/2.15.30 Python/3.11.8 Linux/6.5.0-1016-azure exe/x86_64.ubuntu.22"
+
+OFFICE_IPS = {"alice": "198.51.100.20", "bob": "198.51.100.21", "carol": "198.51.100.22"}
+CI_IP = "192.0.2.10"
+MONITOR_IP = IDLE.ip
+INTRUDER_IP = "203.0.113.61"
+LEAKED_KEY_IP = "203.0.113.77"
+
+ADMIN_POLICY = "arn:aws:iam::aws:policy/AdministratorAccess"
+AMI = "ami-0a1b2c3d4e5f60789"
+
+
+@dataclass(frozen=True)
+class Identity:
+    """Who made the call, as CloudTrail's userIdentity block describes it."""
+
+    kind: str  # IAMUser, AssumedRole, Root or AWSService
+    name: str  # user name, role name, "root", or the calling service's host name
+    session: str = ""  # assumed-role session name
+    key: str = ""  # access key id (documentation examples only)
+    console: bool = False  # credentials came from a console sign-in
+    mfa: bool = False  # the session was authenticated with MFA
+
+    @property
+    def arn(self) -> str:
+        if self.kind == "Root":
+            return f"arn:aws:iam::{ACCOUNT}:root"
+        if self.kind == "IAMUser":
+            return f"arn:aws:iam::{ACCOUNT}:user/{self.name}"
+        if self.kind == "AssumedRole":
+            return f"arn:aws:sts::{ACCOUNT}:assumed-role/{self.name}/{self.session}"
+        return ""
+
+    @property
+    def user_name(self) -> str:
+        """What the console's CSV export shows in its User name column."""
+        return self.session if self.kind == "AssumedRole" else self.name
+
+    def principal_id(self) -> str:
+        digest = hashlib.sha1(f"{self.kind}:{self.name}".encode()).hexdigest().upper()
+        return {"IAMUser": "AIDA", "AssumedRole": "AROA"}.get(self.kind, "") + "EX" + digest[:15]
+
+    def json(self, t: datetime) -> dict[str, object]:
+        if self.kind == "AWSService":
+            return {"type": "AWSService", "invokedBy": self.name}
+        attributes = {
+            "creationDate": tstamp(t - timedelta(minutes=5)),
+            "mfaAuthenticated": "true" if self.mfa else "false",
+        }
+        if self.kind == "Root":
+            out: dict[str, object] = {
+                "type": "Root",
+                "principalId": ACCOUNT,
+                "arn": self.arn,
+                "accountId": ACCOUNT,
+                "accessKeyId": self.key,
+            }
+            if self.console:
+                out["sessionContext"] = {"attributes": attributes}
+                out["sessionCredentialFromConsole"] = "true"
+            return out
+        if self.kind == "IAMUser":
+            out = {
+                "type": "IAMUser",
+                "principalId": self.principal_id(),
+                "arn": self.arn,
+                "accountId": ACCOUNT,
+                "accessKeyId": self.key,
+                "userName": self.name,
+            }
+            if self.console:
+                out["sessionContext"] = {"attributes": attributes}
+                out["sessionCredentialFromConsole"] = "true"
+            return out
+        role_id = self.principal_id()
+        return {
+            "type": "AssumedRole",
+            "principalId": f"{role_id}:{self.session}",
+            "arn": self.arn,
+            "accountId": ACCOUNT,
+            "accessKeyId": self.key,
+            "sessionContext": {
+                "sessionIssuer": {
+                    "type": "Role",
+                    "principalId": role_id,
+                    "arn": f"arn:aws:iam::{ACCOUNT}:role/{self.name}",
+                    "accountId": ACCOUNT,
+                    "userName": self.name,
+                },
+                "attributes": attributes,
+            },
+        }
+
+
+ALICE = Identity("IAMUser", "alice", key="AKIAIOSFODNN7EXAMPLE")
+BOB = Identity("IAMUser", "bob", key="AKIAI44QH8DHBEXAMPLE")
+CAROL = Identity("IAMUser", "carol")
+ROOT = Identity("Root", "root")
+BACKUP_ADMIN = Identity("IAMUser", "backup-admin", key="AKIAEXAMPLEBACKUP001")
+DEPLOY = Identity("AssumedRole", "shop-deploy-role", "GitHubActions", "ASIAEXAMPLEDEPLOY001")
+MONITOR = Identity("AssumedRole", "shop-monitoring-role", "grafana", "ASIAEXAMPLEMONITOR01")
+WEB_ROLE = [
+    Identity("AssumedRole", "shop-web-role", h.instance, f"ASIAEXAMPLEWEB00010{i}")
+    for i, h in enumerate(WEB, 1)
+]
+AUTOSCALING = Identity("AWSService", "autoscaling.amazonaws.com")
+CONFIG = Identity("AWSService", "config.amazonaws.com")
+
+
+def tstamp(t: datetime) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def every(
+    rng: random.Random, start: datetime, end: datetime, seconds: float, jitter: float = 0.3
+) -> list[datetime]:
+    """Instants spaced about ``seconds`` apart between start and end."""
+    out: list[datetime] = []
+    t = start + timedelta(seconds=rng.random() * seconds)
+    while t < end:
+        out.append(t)
+        t += timedelta(seconds=seconds * (1 + jitter * (rng.random() * 2 - 1)))
+    return out
+
+
+def denied_message(identity: Identity, action: str, resource: str) -> str:
+    return (
+        f"User: {identity.arn} is not authorized to perform: {action} on resource: {resource} "
+        f"because no identity-based policy allows the {action} action"
+    )
+
+
+@dataclass
+class Event:
+    """One CloudTrail management event."""
+
+    time: datetime
+    identity: Identity
+    service: str  # short service name, e.g. "ec2"
+    name: str
+    region: str
+    ip: str
+    agent: str
+    read_only: bool = True
+    error: tuple[str, str] | None = None  # (errorCode, errorMessage)
+    params: dict[str, object] | None = None
+    response: dict[str, object] | None = None
+    additional: dict[str, object] | None = None
+    resources: list[dict[str, str]] = field(default_factory=list)
+    event_type: str = "AwsApiCall"
+
+    @property
+    def source(self) -> str:
+        return f"{self.service}.amazonaws.com"
+
+    def row(self, rng: random.Random) -> list[str]:
+        event_id = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+        request_id = str(uuid.UUID(int=rng.getrandbits(128), version=4))
+        record: dict[str, object] = {
+            "eventVersion": "1.10",
+            "userIdentity": self.identity.json(self.time),
+            "eventTime": tstamp(self.time),
+            "eventSource": self.source,
+            "eventName": self.name,
+            "awsRegion": self.region,
+            "sourceIPAddress": self.ip,
+            "userAgent": self.agent,
+        }
+        if self.error:
+            record["errorCode"], record["errorMessage"] = self.error
+        record.update(
+            {
+                "requestParameters": self.params,
+                "responseElements": self.response,
+            }
+        )
+        if self.additional:
+            record["additionalEventData"] = self.additional
+        record.update(
+            {
+                "requestID": request_id,
+                "eventID": event_id,
+                "readOnly": self.read_only,
+            }
+        )
+        if self.resources:
+            record["resources"] = self.resources
+        record.update(
+            {
+                "eventType": self.event_type,
+                "managementEvent": True,
+                "recipientAccountId": ACCOUNT,
+                "eventCategory": "Management",
+            }
+        )
+        first = self.resources[0] if self.resources else {}
+        return [
+            event_id,
+            tstamp(self.time),
+            self.identity.user_name,
+            self.name,
+            self.source,
+            first.get("resourceType", ""),
+            first.get("ARN", ""),
+            self.region,
+            self.ip,
+            self.error[0] if self.error else "",
+            "true" if self.read_only else "false",
+            self.identity.key,
+            self.event_type,
+            request_id,
+            "Management",
+            ACCOUNT,
+            json.dumps(self.resources, separators=(",", ":")) if self.resources else "",
+            json.dumps(record, separators=(",", ":")),
+        ]
+
+
+def call(
+    rng: random.Random,
+    t: datetime,
+    who: Identity,
+    action: str,
+    ip: str,
+    agent: str,
+    *,
+    region: str = HOME_REGION,
+    read_only: bool = True,
+    denied: bool = False,
+    **extra: object,
+) -> Event:
+    """Build an event from ``service:Action``. Denied calls get the service's usual error."""
+    service, name = action.split(":")
+    if service in ("iam", "organizations", "route53", "signin"):
+        region = GLOBAL_REGION
+    error = None
+    if denied:
+        resource = extra.pop("resource", "*")
+        code = {
+            "ec2": "Client.UnauthorizedOperation",
+            "secretsmanager": "AccessDeniedException",
+            "kms": "AccessDeniedException",
+            "ssm": "AccessDeniedException",
+            "eks": "AccessDeniedException",
+            "lambda": "AccessDeniedException",
+            "cloudtrail": "AccessDeniedException",
+            "organizations": "AccessDeniedException",
+            "dynamodb": "AccessDeniedException",
+        }.get(service, "AccessDenied")
+        error = (code, denied_message(who, action, str(resource)))
+    else:
+        extra.pop("resource", None)
+    return Event(
+        t, who, service, name, region, ip, agent, read_only=read_only, error=error, **extra
+    )
+
+
+def web_role_events(rng: random.Random) -> list[Event]:
+    """Three web instances reading parameters and secrets, then a parameter they may not."""
+    out: list[Event] = []
+    names = ["/shop/web/db-host", "/shop/web/cache-host", "/shop/web/session-key-id"]
+    for host, who in zip(WEB, WEB_ROLE, strict=True):
+        for t in every(rng, T0, T0 + DURATION, 30):
+            out.append(
+                call(
+                    rng,
+                    t,
+                    who,
+                    "ssm:GetParameters",
+                    host.ip,
+                    SDK_AGENT,
+                    params={"names": names, "withDecryption": True},
+                    resources=[
+                        {
+                            "resourceType": "AWS::SSM::Parameter",
+                            "ARN": f"arn:aws:ssm:{HOME_REGION}:{ACCOUNT}:parameter{names[0]}",
+                        }
+                    ],
+                )
+            )
+        for t in every(rng, T0, T0 + DURATION, 1800):
+            secret = f"arn:aws:secretsmanager:{HOME_REGION}:{ACCOUNT}:secret:shop/web/db-Ab12Cd"
+            out.append(
+                call(
+                    rng,
+                    t,
+                    who,
+                    "secretsmanager:GetSecretValue",
+                    host.ip,
+                    SDK_AGENT,
+                    params={"secretId": "shop/web/db"},
+                    resources=[{"resourceType": "AWS::SecretsManager::Secret", "ARN": secret}],
+                )
+            )
+            out.append(
+                call(
+                    rng,
+                    t + timedelta(milliseconds=120),
+                    who,
+                    "kms:Decrypt",
+                    host.ip,
+                    SDK_AGENT,
+                    params={"encryptionAlgorithm": "SYMMETRIC_DEFAULT"},
+                )
+            )
+        # Planted: a feature-flag parameter the role's policy does not cover, retried every
+        # 30 seconds by each instance from 09:30 onwards.
+        parameter = TRAIL_PLANTED["denied_retry_loop"]["parameter"]
+        window = TRAIL_PLANTED["denied_retry_loop"]["window"]
+        for t in every(rng, at(window[0]), at(window[1]), 30, jitter=0.1):
+            out.append(
+                call(
+                    rng,
+                    t,
+                    who,
+                    "ssm:GetParameter",
+                    host.ip,
+                    SDK_AGENT,
+                    denied=True,
+                    resource=f"arn:aws:ssm:{HOME_REGION}:{ACCOUNT}:parameter{parameter}",
+                    params={"name": parameter, "withDecryption": False},
+                )
+            )
+    return out
+
+
+def service_events(rng: random.Random) -> list[Event]:
+    out: list[Event] = []
+    for t in every(rng, T0, T0 + DURATION, 60, jitter=0.05):
+        out.append(
+            call(
+                rng,
+                t,
+                AUTOSCALING,
+                "ec2:DescribeInstanceStatus",
+                AUTOSCALING.name,
+                AUTOSCALING.name,
+            )
+        )
+    config_calls = [
+        "ec2:DescribeInstances",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeVolumes",
+        "s3:GetBucketPolicy",
+        "iam:ListPolicies",
+        "rds:DescribeDBInstances",
+    ]
+    for t in every(rng, T0, T0 + DURATION, 180):
+        out.append(call(rng, t, CONFIG, rng.choice(config_calls), CONFIG.name, CONFIG.name))
+    return out
+
+
+def monitoring_events(rng: random.Random) -> list[Event]:
+    """Grafana polling CloudWatch and RDS in the home region and the DR region."""
+    out: list[Event] = []
+    for t in every(rng, T0, T0 + DURATION, 60, jitter=0.05):
+        for region in (HOME_REGION, DR_REGION):
+            out.append(
+                call(
+                    rng,
+                    t + timedelta(milliseconds=rng.randrange(50, 400)),
+                    MONITOR,
+                    "cloudwatch:GetMetricData",
+                    MONITOR_IP,
+                    BOTO_AGENT,
+                    region=region,
+                )
+            )
+    for t in every(rng, T0, T0 + DURATION, 120):
+        for region in (HOME_REGION, DR_REGION):
+            out.append(
+                call(
+                    rng,
+                    t,
+                    MONITOR,
+                    "rds:DescribeDBInstances",
+                    MONITOR_IP,
+                    BOTO_AGENT,
+                    region=region,
+                )
+            )
+    for t in every(rng, T0, T0 + DURATION, 2400):
+        out.append(
+            call(
+                rng,
+                t,
+                MONITOR,
+                "rds:DescribeDBLogFiles",
+                MONITOR_IP,
+                BOTO_AGENT,
+                denied=True,
+                resource=f"arn:aws:rds:{HOME_REGION}:{ACCOUNT}:db:shop-db",
+            )
+        )
+    return out
+
+
+ALICE_CALLS: list[tuple[str, int]] = [
+    ("ec2:DescribeInstances", 10),
+    ("ec2:DescribeSecurityGroups", 4),
+    ("ecs:DescribeServices", 6),
+    ("ecs:ListTasks", 4),
+    ("ecs:DescribeTasks", 3),
+    ("logs:DescribeLogGroups", 3),
+    ("logs:FilterLogEvents", 5),
+    ("cloudwatch:GetMetricData", 4),
+    ("elasticloadbalancing:DescribeTargetHealth", 5),
+    ("s3:ListBuckets", 2),
+    ("sts:GetCallerIdentity", 3),
+    ("lambda:ListFunctions", 2),
+    ("iam:GetRole", 2),
+    ("iam:ListRoles", 1),
+]
+BOB_CALLS: list[tuple[str, int]] = [
+    ("ec2:DescribeInstances", 6),
+    ("dynamodb:ListTables", 3),
+    ("dynamodb:DescribeTable", 4),
+    ("lambda:ListFunctions", 3),
+    ("lambda:GetFunction", 4),
+    ("logs:FilterLogEvents", 4),
+    ("cloudformation:DescribeStacks", 4),
+    ("cloudformation:ListStackResources", 2),
+    ("s3:ListBuckets", 2),
+    ("sts:GetCallerIdentity", 2),
+]
+
+
+def weighted(rng: random.Random, options: list[tuple[str, int]]) -> str:
+    return rng.choices([a for a, _ in options], weights=[w for _, w in options])[0]
+
+
+def developer_events(rng: random.Random) -> list[Event]:
+    out: list[Event] = []
+    for t in every(rng, T0, T0 + DURATION, 24, jitter=0.9):
+        action = weighted(rng, ALICE_CALLS)
+        region = DR_REGION if action.startswith("rds") or rng.random() < 0.08 else HOME_REGION
+        out.append(call(rng, t, ALICE, action, OFFICE_IPS["alice"], CLI_AGENT, region=region))
+    for t in every(rng, T0, T0 + DURATION, 48, jitter=0.9):
+        out.append(call(rng, t, BOB, weighted(rng, BOB_CALLS), OFFICE_IPS["bob"], CLI_AGENT))
+    # A few one-off mutations and the odd sporadic denial that every account has.
+    out.append(
+        call(
+            rng,
+            at("08:37"),
+            ALICE,
+            "ec2:CreateTags",
+            OFFICE_IPS["alice"],
+            CLI_AGENT,
+            read_only=False,
+            params={"resourcesSet": {"items": [{"resourceId": WEB[0].instance}]}},
+        )
+    )
+    out.append(
+        call(
+            rng,
+            at("08:41"),
+            ALICE,
+            "ec2:StartInstances",
+            OFFICE_IPS["alice"],
+            CLI_AGENT,
+            read_only=False,
+            denied=True,
+            resource=f"arn:aws:ec2:{HOME_REGION}:{ACCOUNT}:instance/{IDLE.instance}",
+        )
+    )
+    for hhmm in ("08:23", "09:48"):
+        out.append(
+            call(
+                rng,
+                at(hhmm),
+                BOB,
+                "iam:CreateAccessKey",
+                OFFICE_IPS["bob"],
+                CLI_AGENT,
+                read_only=False,
+                denied=True,
+                resource=BOB.arn,
+            )
+        )
+    return out
+
+
+def deploy_events(rng: random.Random, start: datetime) -> list[Event]:
+    """One GitHub Actions deploy of the web service: push an image, roll the ECS service."""
+    out: list[Event] = []
+    t = start
+    service_arn = f"arn:aws:ecs:{HOME_REGION}:{ACCOUNT}:service/shop/shop-web"
+    steps: list[tuple[str, bool, dict[str, object]]] = [
+        ("sts:GetCallerIdentity", True, {}),
+        ("ecr:GetAuthorizationToken", True, {}),
+        ("ecr:DescribeImages", True, {"params": {"repositoryName": "shop-web"}}),
+        (
+            "ecs:RegisterTaskDefinition",
+            False,
+            {"params": {"family": "shop-web", "cpu": "512", "memory": "1024"}},
+        ),
+        (
+            "ecs:UpdateService",
+            False,
+            {
+                "params": {"cluster": "shop", "service": "shop-web", "taskDefinition": "shop-web"},
+                "resources": [{"resourceType": "AWS::ECS::Service", "ARN": service_arn}],
+            },
+        ),
+    ]
+    for action, read_only, extra in steps:
+        t += timedelta(seconds=rng.uniform(2, 15))
+        out.append(call(rng, t, DEPLOY, action, CI_IP, GITHUB_AGENT, read_only=read_only, **extra))
+    for _ in range(18):
+        t += timedelta(seconds=rng.uniform(15, 25))
+        out.append(call(rng, t, DEPLOY, "ecs:DescribeServices", CI_IP, GITHUB_AGENT))
+        if rng.random() < 0.5:
+            out.append(
+                call(
+                    rng,
+                    t + timedelta(seconds=1),
+                    DEPLOY,
+                    "elasticloadbalancing:DescribeTargetHealth",
+                    CI_IP,
+                    GITHUB_AGENT,
+                )
+            )
+    return out
+
+
+def console_login(
+    t: datetime, who: Identity, ip: str, agent: str, *, mfa: bool, success: bool = True
+) -> Event:
+    additional: dict[str, object] = {
+        "LoginTo": "https://console.aws.amazon.com/console/home?region=eu-west-1",
+        "MobileVersion": "No",
+        "MFAUsed": "Yes" if mfa else "No",
+    }
+    return Event(
+        t,
+        who,
+        "signin",
+        "ConsoleLogin",
+        GLOBAL_REGION,
+        ip,
+        agent,
+        read_only=False,
+        error=None if success else ("", "Failed authentication"),
+        response={"ConsoleLogin": "Success" if success else "Failure"},
+        additional=additional,
+        event_type="AwsConsoleSignIn",
+    )
+
+
+def console_session(
+    rng: random.Random, who: Identity, start: datetime, ip: str, calls: int, *, mfa: bool
+) -> list[Event]:
+    """The read-only calls the console makes while someone clicks around."""
+    session = Identity(
+        who.kind, who.name, key=f"ASIAEXAMPLECONSOLE{rng.randrange(10, 99)}", console=True, mfa=mfa
+    )
+    pages = [
+        ("ec2:DescribeInstances", "console.ec2.amazonaws.com"),
+        ("ec2:DescribeSecurityGroups", "console.ec2.amazonaws.com"),
+        ("ec2:DescribeVolumes", "console.ec2.amazonaws.com"),
+        ("s3:ListBuckets", "AWS Internal"),
+        ("cloudwatch:DescribeAlarms", "console.amazonaws.com"),
+        ("ecs:ListClusters", "console.amazonaws.com"),
+        ("iam:ListUsers", "console.amazonaws.com"),
+        ("iam:GetAccountSummary", "console.amazonaws.com"),
+    ]
+    out: list[Event] = []
+    t = start
+    for _ in range(calls):
+        t += timedelta(seconds=rng.uniform(5, 90))
+        action, agent = rng.choice(pages)
+        out.append(call(rng, t, session, action, ip, agent))
+    return out
+
+
+def sign_in_events(rng: random.Random) -> list[Event]:
+    out: list[Event] = []
+    out.append(console_login(at("08:05"), ALICE, OFFICE_IPS["alice"], MAC_BROWSER, mfa=True))
+    out += console_session(rng, ALICE, at("08:05"), OFFICE_IPS["alice"], 14, mfa=True)
+    out.append(console_login(at("09:00"), BOB, OFFICE_IPS["bob"], MAC_BROWSER, mfa=True))
+    out += console_session(rng, BOB, at("09:00"), OFFICE_IPS["bob"], 10, mfa=True)
+    # Planted: carol has no MFA device. One typo, then two successful password-only sign-ins.
+    carol_ip = OFFICE_IPS["carol"]
+    out.append(console_login(at("08:14"), CAROL, carol_ip, MAC_BROWSER, mfa=False, success=False))
+    out.append(console_login(at("08:15"), CAROL, carol_ip, MAC_BROWSER, mfa=False))
+    out += console_session(rng, CAROL, at("08:15"), carol_ip, 12, mfa=False)
+    out.append(console_login(at("09:40"), CAROL, carol_ip, MAC_BROWSER, mfa=False))
+    out += console_session(rng, CAROL, at("09:40"), carol_ip, 8, mfa=False)
+    return out
+
+
+ENUMERATED: list[str] = [
+    "iam:ListUsers",
+    "iam:ListRoles",
+    "iam:ListAccessKeys",
+    "iam:CreateUser",
+    "iam:CreateAccessKey",
+    "iam:AttachUserPolicy",
+    "iam:GetAccountAuthorizationDetails",
+    "secretsmanager:ListSecrets",
+    "secretsmanager:GetSecretValue",
+    "kms:ListKeys",
+    "ssm:DescribeParameters",
+    "ssm:GetParametersByPath",
+    "rds:DescribeDBInstances",
+    "ec2:RunInstances",
+    "ec2:CreateKeyPair",
+    "ec2:CreateSecurityGroup",
+    "s3:GetBucketPolicy",
+    "s3:PutBucketPolicy",
+    "cloudtrail:DescribeTrails",
+    "cloudtrail:StopLogging",
+    "organizations:ListAccounts",
+    "eks:ListClusters",
+]
+ALLOWED_FOR_BOB = [
+    "sts:GetCallerIdentity",
+    "s3:ListBuckets",
+    "ec2:DescribeRegions",
+    "ec2:DescribeInstances",
+    "lambda:ListFunctions",
+]
+MUTATING = {
+    "CreateUser",
+    "CreateAccessKey",
+    "AttachUserPolicy",
+    "RunInstances",
+    "CreateKeyPair",
+    "CreateSecurityGroup",
+    "AuthorizeSecurityGroupIngress",
+    "PutBucketPolicy",
+    "StopLogging",
+}
+
+
+def leaked_key_events(rng: random.Random) -> list[Event]:
+    """Planted: bob's access key used from an unknown address to test what it can do."""
+    plan = TRAIL_PLANTED["denied_enumeration"]
+    start, end = at(plan["window"][0]), at(plan["window"][1])
+    actions = [a for a in ENUMERATED for _ in range(10)] + [
+        a for a in ALLOWED_FOR_BOB for _ in range(2)
+    ]
+    rng.shuffle(actions)
+    step = (end - start).total_seconds() / len(actions)
+    out: list[Event] = []
+    for i, action in enumerate(actions):
+        t = start + timedelta(seconds=i * step + rng.uniform(0, step * 0.8))
+        service, name = action.split(":")
+        out.append(
+            call(
+                rng,
+                t,
+                BOB,
+                action,
+                plan["ip"],
+                BOTO_AGENT,
+                read_only=name not in MUTATING,
+                denied=action in ENUMERATED,
+                resource=f"arn:aws:{service}:{HOME_REGION}:{ACCOUNT}:*",
+            )
+        )
+    return out
+
+
+def root_events(rng: random.Random) -> list[Event]:
+    """Planted: root signs in without MFA and creates an administrator user."""
+    plan = TRAIL_PLANTED["root_activity"]
+    ip = plan["ip"]
+    root = Identity("Root", "root", key="ASIAEXAMPLEROOT00001", console=True, mfa=False)
+    user_arn = BACKUP_ADMIN.arn
+    out = [console_login(at(plan["window"][0]), ROOT, ip, WIN_BROWSER, mfa=False)]
+    t = at(plan["window"][0]) + timedelta(seconds=40)
+    steps: list[tuple[str, bool, dict[str, object]]] = [
+        ("iam:GetAccountSummary", True, {}),
+        ("iam:ListUsers", True, {}),
+        ("iam:ListAccessKeys", True, {}),
+        (
+            "iam:CreateUser",
+            False,
+            {
+                "params": {"userName": BACKUP_ADMIN.name},
+                "response": {"user": {"userName": BACKUP_ADMIN.name, "arn": user_arn}},
+                "resources": [{"resourceType": "AWS::IAM::User", "ARN": user_arn}],
+            },
+        ),
+        (
+            "iam:AttachUserPolicy",
+            False,
+            {
+                "params": {"userName": BACKUP_ADMIN.name, "policyArn": ADMIN_POLICY},
+                "resources": [{"resourceType": "AWS::IAM::User", "ARN": user_arn}],
+            },
+        ),
+        (
+            "iam:CreateAccessKey",
+            False,
+            {
+                "params": {"userName": BACKUP_ADMIN.name},
+                "response": {
+                    "accessKey": {
+                        "accessKeyId": BACKUP_ADMIN.key,
+                        "status": "Active",
+                        "userName": BACKUP_ADMIN.name,
+                    }
+                },
+                "resources": [{"resourceType": "AWS::IAM::User", "ARN": user_arn}],
+            },
+        ),
+        ("ec2:DescribeInstances", True, {}),
+        ("s3:ListBuckets", True, {}),
+        ("cloudtrail:DescribeTrails", True, {}),
+        ("iam:ListUsers", True, {}),
+    ]
+    for action, read_only, extra in steps:
+        t += timedelta(seconds=rng.uniform(20, 70))
+        out.append(
+            call(rng, t, root, action, ip, "console.amazonaws.com", read_only=read_only, **extra)
+        )
+    return out
+
+
+def unusual_region_events(rng: random.Random) -> list[Event]:
+    """Planted: the new user launches GPU instances in regions this account never uses."""
+    plan = TRAIL_PLANTED["unusual_regions"]
+    ip = TRAIL_PLANTED["root_activity"]["ip"]
+    out: list[Event] = []
+    t = at("09:24")
+    for action in ("sts:GetCallerIdentity", "ec2:DescribeInstances", "ec2:DescribeRegions"):
+        t += timedelta(seconds=rng.uniform(10, 40))
+        out.append(call(rng, t, BACKUP_ADMIN, action, ip, BOTO_AGENT))
+    launches = {plan["regions"][0]: 4, plan["regions"][1]: 2}
+    for region, count in launches.items():
+        sg = f"sg-0{rng.getrandbits(64):016x}"
+        steps: list[tuple[str, bool, dict[str, object]]] = [
+            ("ec2:DescribeVpcs", True, {}),
+            ("ec2:DescribeImages", True, {"params": {"imagesSet": {"items": [{"imageId": AMI}]}}}),
+            (
+                "ec2:CreateKeyPair",
+                False,
+                {"params": {"keyName": "backup", "keyType": "rsa"}},
+            ),
+            (
+                "ec2:CreateSecurityGroup",
+                False,
+                {
+                    "params": {"groupName": "backup-ssh", "groupDescription": "backup"},
+                    "response": {"groupId": sg},
+                },
+            ),
+            (
+                "ec2:AuthorizeSecurityGroupIngress",
+                False,
+                {
+                    "params": {
+                        "groupId": sg,
+                        "ipPermissions": {
+                            "items": [
+                                {
+                                    "ipProtocol": "tcp",
+                                    "fromPort": 22,
+                                    "toPort": 22,
+                                    "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]},
+                                }
+                            ]
+                        },
+                    }
+                },
+            ),
+        ]
+        for _ in range(count):
+            instance = f"i-0{rng.getrandbits(64):016x}"
+            steps.append(
+                (
+                    "ec2:RunInstances",
+                    False,
+                    {
+                        "params": {
+                            "instancesSet": {
+                                "items": [{"imageId": AMI, "minCount": 1, "maxCount": 1}]
+                            },
+                            "instanceType": "g4dn.12xlarge",
+                            "keyName": "backup",
+                            "groupSet": {"items": [{"groupId": sg}]},
+                        },
+                        "response": {"instancesSet": {"items": [{"instanceId": instance}]}},
+                        "resources": [
+                            {
+                                "resourceType": "AWS::EC2::Instance",
+                                "ARN": f"arn:aws:ec2:{region}:{ACCOUNT}:instance/{instance}",
+                            }
+                        ],
+                    },
+                )
+            )
+        steps += [("ec2:DescribeInstances", True, {})] * 3
+        for action, read_only, extra in steps:
+            t += timedelta(seconds=rng.uniform(15, 75))
+            out.append(
+                call(
+                    rng,
+                    t,
+                    BACKUP_ADMIN,
+                    action,
+                    ip,
+                    BOTO_AGENT,
+                    region=region,
+                    read_only=read_only,
+                    **extra,
+                )
+            )
+    return out
+
+
+def cloudtrail_events(rng: random.Random) -> list[Event]:
+    events = web_role_events(rng)
+    events += service_events(rng)
+    events += monitoring_events(rng)
+    events += developer_events(rng)
+    events += deploy_events(rng, at("08:20"))
+    events += deploy_events(rng, at("09:35"))
+    events += sign_in_events(rng)
+    events += leaked_key_events(rng)
+    events += root_events(rng)
+    events += unusual_region_events(rng)
+    events = [e for e in events if T0 <= e.time < T0 + DURATION]
+    events.sort(key=lambda e: (e.time, e.identity.user_name, e.name))
+    return events
+
+
+def write_cloudtrail(out: Path, rng: random.Random) -> None:
+    with (out / "cloudtrail_events.csv").open("w", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(TRAIL_HEADER)
+        for event in cloudtrail_events(rng):
+            writer.writerow(event.row(rng))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", default="samples", help="output directory")
@@ -1298,6 +2204,7 @@ def main() -> None:
     write_sales(out, random.Random(SEED + 1))
     write_alb(out, random.Random(SEED + 2))
     write_nlb(out, random.Random(SEED + 3))
+    write_cloudtrail(out, random.Random(SEED + 4))
     for p in sorted(out.iterdir()):
         print(f"{p.name:40s} {p.stat().st_size / 1024:8.0f} KB")
 

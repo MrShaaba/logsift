@@ -45,3 +45,18 @@ def test_load_balancer_samples_are_fictional(name: str) -> None:
     assert hosts <= {"shop.example.com", "api.example.com"}
     assert "123456789012" in text
     assert "eu-west-1" in text
+
+
+def test_cloudtrail_sample_is_fictional() -> None:
+    import re
+
+    text = (ROOT / "samples" / "cloudtrail_events.csv").read_text()
+    ips = set(re.findall(IP_RE, text)) - {"0.0.0.0"}  # the open-to-the-world CIDR in a rule
+    assert ips and all(ip.startswith(ALLOWED_PREFIXES) for ip in ips)
+    hosts = set(re.findall(r"[a-z0-9.-]+\.(?:com|net|org|io)\b", text))
+    assert hosts and all(h.endswith(("amazonaws.com", "aws.amazon.com")) for h in hosts)
+    # Twelve digits not inside a hex id (a UUID segment can happen to be all digits).
+    accounts = set(re.findall(r"(?<![0-9a-f-])\d{12}(?![0-9a-f])", text))
+    assert accounts == {"123456789012"}
+    keys = set(re.findall(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", text))
+    assert keys and all("EXAMPLE" in k for k in keys)
