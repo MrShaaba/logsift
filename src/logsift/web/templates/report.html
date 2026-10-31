@@ -19,7 +19,7 @@
 <h2>What this file looks like</h2>
 <div class="card"><ul class="summary" style="margin:0;padding-left:18px">{% for line in profile.summary %}<li>{{ line }}</li>{% endfor %}</ul></div>
 
-{% if ds.is_flow_log %}
+{% if ds.has_rules %}
 <h2>Findings <span class="muted" style="font-weight:400;font-size:14px">{{ findings | length }} rules fired</span></h2>
 {% include "_findings.html" %}
 {% endif %}

@@ -89,3 +89,31 @@ def test_errors_render_as_html(client: TestClient, flow_url: str) -> None:
     assert "no longer loaded" in r.text and "<html" in r.text
     assert client.get(f"{flow_url}/explore?finding=nope").status_code == 404
     assert client.get(f"{flow_url}/export/findings.pdf").status_code == 404
+
+
+def test_load_balancer_overview_explore_and_export(client: TestClient) -> None:
+    r = client.post("/load-sample", data={"name": "alb_access_logs.log"}, follow_redirects=False)
+    url = r.headers["location"]
+    page = client.get(url)
+    assert page.status_code == 200
+    assert "Application Load Balancer access log" in page.text
+    assert "Requests against server errors (5xx), per minute" in page.text
+    assert "Target 10.0.2.11:8080 failed 48% of its requests" in page.text
+    assert "Likely cause:" in page.text
+    r = client.get(f"{url}/explore?finding=failing-target-1")
+    assert r.status_code == 200 and "of 396" in r.text
+    r = client.get(
+        f"{url}/rows?col=path&val=/api/reports/export&sort=target_processing_time&desc=1"
+    )
+    assert "of 60" in r.text
+    rows = client.get(f"{url}/export/rows.csv?finding=probing-1").text.splitlines()
+    assert len(rows) == 157 and rows[0].startswith("time,type,client_ip")
+    assert client.get(f"{url}/export/findings.xlsx").status_code == 200
+
+
+def test_nlb_overview(client: TestClient) -> None:
+    r = client.post("/load-sample", data={"name": "nlb_access_logs.log"}, follow_redirects=False)
+    page = client.get(r.headers["location"])
+    assert "Network Load Balancer access log" in page.text
+    assert "Completed connections against failed TLS handshakes" in page.text
+    assert "190 TLS handshakes failed" in page.text

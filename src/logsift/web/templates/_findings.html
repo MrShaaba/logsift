@@ -1,9 +1,9 @@
 {% if timeline %}
 {% set g = timeline_geometry(timeline) %}
 <div class="card" style="margin-bottom:14px">
-  <h3 style="margin-top:0">Accepted against rejected flows, per {{ g.bucket }}</h3>
-  <div class="legend"><span><i style="background:var(--ok)"></i>accepted</span><span><i style="background:var(--bad)"></i>rejected</span><span class="muted">peak {{ g.max_value | num }} flows</span></div>
-  <svg class="timeline" viewBox="0 0 {{ g.width }} {{ g.height }}" width="100%" preserveAspectRatio="none" style="height:{{ g.height }}px" role="img" aria-label="timeline of accepted and rejected flows">
+  <h3 style="margin-top:0">{{ timeline.title | default("Accepted against rejected flows") }}, per {{ g.bucket }}</h3>
+  <div class="legend"><span><i style="background:var(--ok)"></i>{{ timeline.good | default("accepted") }}</span><span><i style="background:var(--bad)"></i>{{ timeline.bad | default("rejected") }}</span><span class="muted">peak {{ g.max_value | num }} {{ timeline.unit | default("flows") }}</span></div>
+  <svg class="timeline" viewBox="0 0 {{ g.width }} {{ g.height }}" width="100%" preserveAspectRatio="none" style="height:{{ g.height }}px" role="img" aria-label="{{ timeline.title | default("Accepted against rejected flows") | lower }}">
     <line x1="40" y1="{{ g.height - 24 }}" x2="{{ g.width }}" y2="{{ g.height - 24 }}"/>
     <text x="0" y="14">{{ g.max_value | num }}</text>
     <text x="0" y="{{ g.height - 28 }}">0</text>

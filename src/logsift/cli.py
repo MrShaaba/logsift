@@ -57,7 +57,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print()
     for line in ds.profile.summary:
         print(f"  {line}")
-    if ds.is_flow_log:
+    if ds.has_rules:
         print()
         for f in ds.findings:
             print(f"  [{f.severity.upper():6s}] {f.title}")

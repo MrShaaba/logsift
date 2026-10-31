@@ -15,6 +15,14 @@ def test_inspect_prints_summary_and_findings(samples: Path, capsys: pytest.Captu
     assert "Likely cause:" in out
 
 
+def test_inspect_load_balancer_log(samples: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["inspect", str(samples / "nlb_access_logs.log")]) == 0
+    out = capsys.readouterr().out
+    assert "Network Load Balancer access log" in out
+    assert "[HIGH  ] 190 TLS handshakes failed (6.3% of connections)" in out
+    assert "[MEDIUM] 198.51.100.23 opened 601 connections" in out
+
+
 def test_report_is_self_contained(
     samples: Path, tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

@@ -96,18 +96,22 @@ class Dataset:
 
     @cached_property
     def findings(self) -> list[Finding]:
-        if not self.is_flow_log:
+        if self.is_flow_log:
+            from logsift.insights.flowlogs import run_rules
+        elif self.is_lb_log:
+            from logsift.insights.lblogs import run_rules
+        else:
             return []
-        from logsift.insights.flowlogs import run_rules
-
         return run_rules(self)
 
     @cached_property
     def timeline(self) -> dict[str, Any] | None:
-        if not self.is_flow_log:
+        if self.is_flow_log:
+            from logsift.insights.flowlogs import build_timeline
+        elif self.is_lb_log:
+            from logsift.insights.lblogs import build_timeline
+        else:
             return None
-        from logsift.insights.flowlogs import build_timeline
-
         return build_timeline(self)
 
     def finding(self, finding_id: str) -> Finding | None:

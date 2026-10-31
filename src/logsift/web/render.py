@@ -80,6 +80,7 @@ def timeline_geometry(tl: dict[str, Any], width: int = 880, height: int = 170) -
     pad_left, pad_bottom, pad_top = 40, 24, 8
     plot_w = width - pad_left - 8
     plot_h = height - pad_bottom - pad_top
+    good, bad = tl.get("good", "accepted"), tl.get("bad", "rejected")
     max_value = max([a + r for a, r in zip(acc, rej, strict=True)] or [1]) or 1
     slot = plot_w / n
     bar_w = max(1.0, slot * 0.8)
@@ -90,8 +91,8 @@ def timeline_geometry(tl: dict[str, Any], width: int = 880, height: int = 170) -
         ha = plot_h * a / max_value
         hr = plot_h * r / max_value
         base = pad_top + plot_h
-        accepted.append(Bar(x, base - ha, bar_w, ha, f"{label}: {a:,} accepted"))
-        rejected.append(Bar(x, base - ha - hr, bar_w, hr, f"{label}: {r:,} rejected"))
+        accepted.append(Bar(x, base - ha, bar_w, ha, f"{label}: {a:,} {good}"))
+        rejected.append(Bar(x, base - ha - hr, bar_w, hr, f"{label}: {r:,} {bad}"))
     step = max(1, n // 10)
     ticks = [(pad_left + i * slot + slot / 2, labels[i]) for i in range(0, n, step)]
     return TimelineGeometry(width, height, accepted, rejected, ticks, max_value, tl["bucket"])
