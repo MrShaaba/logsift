@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 from logsift.formats import Format, canonical, detect_format
@@ -14,6 +15,8 @@ def test_sample_formats(samples: Path) -> None:
         "vpc_flow_logs_custom_v5.log": Format.VPC_CUSTOM,
         "cloudwatch_insights_export.csv": Format.CW_INSIGHTS,
         "daily_sales.csv": Format.GENERIC,
+        "alb_access_logs.log": Format.ALB,
+        "nlb_access_logs.log": Format.NLB,
     }
     for name, kind in expect.items():
         info = detect_format(sniff(samples / name))
@@ -76,6 +79,53 @@ def test_tab_separated_custom_flow_log(tmp_path: Path) -> None:
 def test_generic_is_not_mistaken_for_flow_log(samples: Path) -> None:
     info = detect_format(sniff(samples / "daily_sales.csv"))
     assert not info.is_flow_log
+
+
+def fields_of(line: str) -> list[str]:
+    return next(csv.reader([line], delimiter=" "))
+
+
+def join_fields(fields: list[str]) -> str:
+    return " ".join(f'"{f}"' if " " in f or not f else f for f in fields)
+
+
+def test_alb_maps_positional_columns(samples: Path) -> None:
+    info = detect_format(sniff(samples / "alb_access_logs.log"))
+    assert info.is_lb_log and not info.is_flow_log and info.has_rules
+    assert info.lb_columns["column_1"] == "type"
+    assert info.lb_columns["column_13"] == "request"
+    assert info.lb_columns["column_30"] == "conn_trace_id"
+    assert len(info.lb_columns) == 30
+
+
+def test_nlb_maps_positional_columns(samples: Path) -> None:
+    info = detect_format(sniff(samples / "nlb_access_logs.log"))
+    assert info.lb_columns["column_12"] == "incoming_tls_alert"
+    assert info.lb_columns["column_22"] == "tls_connection_creation_time"
+    assert len(info.lb_columns) == 22
+
+
+def test_older_alb_log_with_fewer_fields(samples: Path, tmp_path: Path) -> None:
+    lines = (samples / "alb_access_logs.log").read_text().splitlines()[:20]
+    older = [join_fields(fields_of(ln)[:25]) for ln in lines]
+    info = detect_format(sniff(write(tmp_path, "old.log", "\n".join(older) + "\n")))
+    assert info.kind == Format.ALB
+    assert info.lb_columns["column_25"] == "error_reason"
+    assert "conn_trace_id" not in info.lb_columns.values()
+
+
+def test_newer_nlb_log_with_extra_fields(samples: Path, tmp_path: Path) -> None:
+    lines = (samples / "nlb_access_logs.log").read_text().splitlines()[:20]
+    newer = [ln + " future-field" for ln in lines]
+    info = detect_format(sniff(write(tmp_path, "new.log", "\n".join(newer) + "\n")))
+    assert info.kind == Format.NLB
+    assert info.lb_columns["column_23"] == "extra_1"
+
+
+def test_space_delimited_file_without_lb_shape_is_generic(tmp_path: Path) -> None:
+    text = "".join(f"2026-03-10T08:00:0{i}Z host{i} 200 ok\n" for i in range(9))
+    info = detect_format(sniff(write(tmp_path, "plain.log", text)))
+    assert info.kind == Format.GENERIC
 
 
 def test_canonical_names() -> None:

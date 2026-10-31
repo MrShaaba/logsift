@@ -13,6 +13,7 @@ import duckdb
 from logsift.explore import table_columns
 from logsift.flow import build_flow_table
 from logsift.formats import FormatInfo, detect_format
+from logsift.lb import build_lb_table
 from logsift.loader import LoadResult, Sniff, load, sniff
 from logsift.profile import Profile, profile_table
 
@@ -30,9 +31,10 @@ class Dataset:
     sniff: Sniff
     format: FormatInfo
     load: LoadResult
+    # "flow" for VPC Flow Logs, "lb" for ALB and NLB access logs, otherwise "raw".
     table: str
-    flow_columns: list[str] = field(default_factory=list)
-    flow_error: str = ""
+    canonical_columns: list[str] = field(default_factory=list)
+    build_error: str = ""
 
     @classmethod
     def open(cls, path: Path | str, name: str | None = None) -> Dataset:
@@ -40,7 +42,7 @@ class Dataset:
         con = duckdb.connect()
         sn = sniff(path)
         fmt = detect_format(sn)
-        nulls = ("", "-") if fmt.is_flow_log else ("",)
+        nulls = ("", "-") if fmt.dash_means_missing else ("",)
         result = load(con, path, sn, table="raw", null_strings=nulls)
         ds = cls(
             id=uuid.uuid4().hex[:10],
@@ -53,18 +55,28 @@ class Dataset:
             load=result,
             table="raw",
         )
-        if fmt.is_flow_log:
+        builder = build_flow_table if fmt.is_flow_log else build_lb_table if fmt.is_lb_log else None
+        if builder is not None:
+            name = "flow" if fmt.is_flow_log else "lb"
             try:
-                ds.flow_columns = build_flow_table(con, fmt, "raw", "flow")
-                ds.table = "flow"
+                ds.canonical_columns = builder(con, fmt, "raw", name)
+                ds.table = name
             except duckdb.Error as exc:  # pragma: no cover - defensive
-                ds.flow_error = str(exc).splitlines()[0]
-                ds.load.warnings.append(f"Could not build the flow table: {ds.flow_error}")
+                ds.build_error = str(exc).splitlines()[0]
+                ds.load.warnings.append(f"Could not build the {name} table: {ds.build_error}")
         return ds
 
     @property
     def is_flow_log(self) -> bool:
         return self.table == "flow"
+
+    @property
+    def is_lb_log(self) -> bool:
+        return self.table == "lb"
+
+    @property
+    def has_rules(self) -> bool:
+        return self.is_flow_log or self.is_lb_log
 
     @property
     def rows(self) -> int:
