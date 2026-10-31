@@ -626,20 +626,31 @@ def rule_sweeps(ctx: Context) -> list[Finding]:
     )
     ports = ctx.sql(
         f"""
-        SELECT srcaddr, dstaddr, (start // {SWEEP_WINDOW}) * {SWEEP_WINDOW} AS win,
-               count(DISTINCT dstport) AS ports, count(*) AS flows,
-               min(dstport) AS lo, max(dstport) AS hi {action_cols}
-        FROM flow WHERE {aimed}
-        GROUP BY ALL HAVING count(DISTINCT dstport) >= {SWEEP_PORTS}
-        ORDER BY ports DESC LIMIT 10
+        WITH w AS (
+            SELECT srcaddr, dstaddr, (start // {SWEEP_WINDOW}) * {SWEEP_WINDOW} AS win,
+                   count(DISTINCT dstport) AS ports, count(*) AS flows,
+                   min(dstport) AS lo, max(dstport) AS hi {action_cols}
+            FROM flow WHERE {aimed}
+            GROUP BY ALL HAVING count(DISTINCT dstport) >= {SWEEP_PORTS}
+        )
+        SELECT srcaddr, dstaddr, count(*) AS windows, max(ports) AS ports, sum(flows) AS flows,
+               min(lo) AS lo, max(hi) AS hi, sum(rejected) AS rejected, sum(accepted) AS accepted,
+               min(win) AS first_win, max(win) AS last_win
+        FROM w GROUP BY ALL ORDER BY ports DESC, flows DESC LIMIT 10
         """
     )
-    for i, (src, dst, win, nports, flows, lo, hi, rejected, accepted) in enumerate(ports, 1):
-        t0 = utc(int(win))
-        t1 = utc(int(win) + SWEEP_WINDOW)
+    for i, row in enumerate(ports, 1):
+        src, dst, windows, nports, flows, lo, hi, rejected, accepted, first_win, last_win = row
+        t0, t1 = utc(int(first_win)), utc(int(last_win) + SWEEP_WINDOW)
         where = (
             f"{aimed} AND srcaddr = {lit(src)} AND dstaddr = {lit(dst)} "
-            f"AND start >= {int(win)} AND start < {int(win) + SWEEP_WINDOW}"
+            f"AND start >= {int(first_win)} AND start < {int(last_win) + SWEEP_WINDOW}"
+        )
+        when = (
+            f"Between {fmt_ts(t0)} and {fmt_ts(t1)} UTC"
+            if windows == 1
+            else f"In {windows} separate five-minute windows between {fmt_ts(t0)} and "
+            f"{fmt_ts(t1)} UTC"
         )
         findings.append(
             Finding(
@@ -647,15 +658,15 @@ def rule_sweeps(ctx: Context) -> list[Finding]:
                 "port_sweep",
                 f"{src} reached {nports} different ports on {dst} within 5 minutes",
                 Severity.MEDIUM,
-                f"Between {fmt_ts(t0)} and {fmt_ts(t1)} UTC, {src} sent {flows:,} flows to "
-                f"ports {lo} through {hi} on {dst}: {rejected:,} rejected, {accepted:,} accepted.",
+                f"{when}, {src} sent {flows:,} flows to ports {lo} through {hi} on {dst}: "
+                f"{rejected:,} rejected, {accepted:,} accepted.",
                 "This is presented as a fact to look at, not as a verdict. Touching many "
                 "ports on one host in a short window is what a port scan looks like, but a "
                 "vulnerability scanner you run yourself, a monitoring agent or a misconfigured "
                 "client can produce the same pattern.",
                 f"If {src} is not a scanner you know about, check which ports were accepted and "
                 "whether the host should be reachable from that address at all.",
-                int(flows),
+                int(ctx.count(where)),
                 where,
                 [
                     Table(
@@ -663,32 +674,39 @@ def rule_sweeps(ctx: Context) -> list[Finding]:
                         [
                             "source",
                             "target",
-                            "window start",
-                            "distinct ports",
+                            "first window",
+                            "windows",
+                            "most ports in one window",
                             "flows",
                             "rejected",
                             "accepted",
                         ],
-                        [(src, dst, t0, nports, flows, rejected, accepted)],
+                        [(src, dst, t0, windows, nports, flows, rejected, accepted)],
                     )
                 ],
             )
         )
     hosts = ctx.sql(
         f"""
-        SELECT srcaddr, (start // {SWEEP_WINDOW}) * {SWEEP_WINDOW} AS win,
-               count(DISTINCT dstaddr) AS hosts, count(*) AS flows,
-               count(DISTINCT dstport) AS ports {action_cols}
-        FROM flow WHERE {aimed}
-        GROUP BY ALL HAVING count(DISTINCT dstaddr) >= {SWEEP_HOSTS}
-        ORDER BY hosts DESC LIMIT 10
+        WITH w AS (
+            SELECT srcaddr, (start // {SWEEP_WINDOW}) * {SWEEP_WINDOW} AS win,
+                   count(DISTINCT dstaddr) AS hosts, count(*) AS flows,
+                   count(DISTINCT dstport) AS ports {action_cols}
+            FROM flow WHERE {aimed}
+            GROUP BY ALL HAVING count(DISTINCT dstaddr) >= {SWEEP_HOSTS}
+        )
+        SELECT srcaddr, count(*) AS windows, max(hosts) AS hosts, sum(flows) AS flows,
+               max(ports) AS ports, sum(rejected) AS rejected, sum(accepted) AS accepted,
+               min(win) AS first_win, max(win) AS last_win
+        FROM w GROUP BY ALL ORDER BY hosts DESC, flows DESC LIMIT 10
         """
     )
-    for i, (src, win, nhosts, flows, nports, rejected, accepted) in enumerate(hosts, 1):
-        t0 = utc(int(win))
+    for i, row in enumerate(hosts, 1):
+        src, windows, nhosts, flows, nports, rejected, accepted, first_win, last_win = row
+        t0 = utc(int(first_win))
         where = (
-            f"{aimed} AND srcaddr = {lit(src)} AND start >= {int(win)} "
-            f"AND start < {int(win) + SWEEP_WINDOW}"
+            f"{aimed} AND srcaddr = {lit(src)} AND start >= {int(first_win)} "
+            f"AND start < {int(last_win) + SWEEP_WINDOW}"
         )
         findings.append(
             Finding(
@@ -696,30 +714,31 @@ def rule_sweeps(ctx: Context) -> list[Finding]:
                 "host_sweep",
                 f"{src} reached {nhosts} different hosts within 5 minutes",
                 Severity.MEDIUM,
-                f"Starting {fmt_ts(t0)} UTC, {src} sent {flows:,} flows to {nhosts} hosts on "
-                f"{nports} port{'s' if nports != 1 else ''}: {rejected:,} rejected, "
-                f"{accepted:,} accepted.",
+                f"Starting {fmt_ts(t0)} UTC{'' if windows == 1 else f' and in {windows} windows'}, "
+                f"{src} sent {flows:,} flows to {nhosts} hosts on {nports} "
+                f"port{'s' if nports != 1 else ''}: {rejected:,} rejected, {accepted:,} accepted.",
                 "One source talking to many hosts in a short burst is what host discovery "
                 "looks like. It is also what a load balancer health check, a configuration "
                 "management server or a backup server looks like, so treat it as a fact to "
                 "check.",
                 f"Confirm what {src} is. If it is unexpected and the flows were accepted, review "
                 "the security groups that let it in.",
-                int(flows),
+                int(ctx.count(where)),
                 where,
                 [
                     Table(
                         "Hosts touched",
                         [
                             "source",
-                            "window start",
-                            "distinct hosts",
+                            "first window",
+                            "windows",
+                            "most hosts in one window",
                             "flows",
                             "ports",
                             "rejected",
                             "accepted",
                         ],
-                        [(src, t0, nhosts, flows, nports, rejected, accepted)],
+                        [(src, t0, windows, nhosts, flows, nports, rejected, accepted)],
                     )
                 ],
             )
