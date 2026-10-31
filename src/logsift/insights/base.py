@@ -18,6 +18,16 @@ SEVERITY_ORDER = {Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2, Severit
 
 
 @dataclass
+class Table:
+    title: str
+    columns: list[str]
+    rows: list[tuple[Any, ...]]
+
+    def to_dicts(self) -> list[dict[str, Any]]:
+        return [dict(zip(self.columns, row, strict=False)) for row in self.rows]
+
+
+@dataclass
 class Finding:
     id: str
     rule: str
@@ -29,10 +39,8 @@ class Finding:
     row_count: int
     # SQL WHERE fragment over the flow table selecting the rows behind this finding.
     row_filter: str
-    # Optional supporting table shown under the finding.
-    table_columns: list[str] = field(default_factory=list)
-    table_rows: list[tuple[Any, ...]] = field(default_factory=list)
-    # Optional time series for a chart: list of (label, series dict).
+    tables: list[Table] = field(default_factory=list)
+    # Optional series for a chart: {"labels": [...], "series": {"name": [...]}}
     chart: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,7 +53,9 @@ class Finding:
             "explanation": self.explanation,
             "likely_cause": self.likely_cause,
             "row_count": self.row_count,
-            "details": [
-                dict(zip(self.table_columns, row, strict=False)) for row in self.table_rows
-            ],
+            "tables": [{"title": t.title, "rows": t.to_dicts()} for t in self.tables],
         }
+
+
+def sort_findings(findings: list[Finding]) -> list[Finding]:
+    return sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], -f.row_count, f.title))

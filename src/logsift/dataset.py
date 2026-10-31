@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 
@@ -89,6 +89,14 @@ class Dataset:
         from logsift.insights.flowlogs import run_rules
 
         return run_rules(self)
+
+    @cached_property
+    def timeline(self) -> dict[str, Any] | None:
+        if not self.is_flow_log:
+            return None
+        from logsift.insights.flowlogs import build_timeline
+
+        return build_timeline(self)
 
     def finding(self, finding_id: str) -> Finding | None:
         return next((f for f in self.findings if f.id == finding_id), None)
