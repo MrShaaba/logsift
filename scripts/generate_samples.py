@@ -54,17 +54,19 @@ class Host:
 
 
 WEB = [
-    Host("10.0.1.10", "eni-0aa11web0000001", "subnet-0web1111111111111", "i-0web0000000000001"),
-    Host("10.0.1.11", "eni-0aa11web0000002", "subnet-0web1111111111111", "i-0web0000000000002"),
-    Host("10.0.1.12", "eni-0aa11web0000003", "subnet-0web1111111111111", "i-0web0000000000003"),
+    Host("10.0.1.10", "eni-0a1b2c3d4e5f60101", "subnet-0a1b2c3d4e5f60001", "i-0a1b2c3d4e5f60101"),
+    Host("10.0.1.11", "eni-0a1b2c3d4e5f60102", "subnet-0a1b2c3d4e5f60001", "i-0a1b2c3d4e5f60102"),
+    Host("10.0.1.12", "eni-0a1b2c3d4e5f60103", "subnet-0a1b2c3d4e5f60001", "i-0a1b2c3d4e5f60103"),
 ]
 APP = [
-    Host("10.0.2.10", "eni-0bb22app0000001", "subnet-0app2222222222222", "i-0app0000000000001"),
-    Host("10.0.2.11", "eni-0bb22app0000002", "subnet-0app2222222222222", "i-0app0000000000002"),
+    Host("10.0.2.10", "eni-0b2c3d4e5f6a70201", "subnet-0b2c3d4e5f6a70002", "i-0b2c3d4e5f6a70201"),
+    Host("10.0.2.11", "eni-0b2c3d4e5f6a70202", "subnet-0b2c3d4e5f6a70002", "i-0b2c3d4e5f6a70202"),
 ]
-DB = Host("10.0.3.20", "eni-0cc33dbb0000001", "subnet-0dbb3333333333333", "i-0dbb0000000000001")
-BASTION = Host("10.0.0.5", "eni-0dd00bas0000001", "subnet-0mgmt000000000000", "i-0bas0000000000001")
-IDLE = Host("10.0.0.9", "eni-0ee00idl0000001", "subnet-0mgmt000000000000", "i-0idl0000000000001")
+DB = Host("10.0.3.20", "eni-0c3d4e5f6a7b80301", "subnet-0c3d4e5f6a7b80003", "i-0c3d4e5f6a7b80301")
+BASTION = Host(
+    "10.0.0.5", "eni-0d4e5f6a7b8c90005", "subnet-0d4e5f6a7b8c90000", "i-0d4e5f6a7b8c90005"
+)
+IDLE = Host("10.0.0.9", "eni-0e5f6a7b8c9d00009", "subnet-0d4e5f6a7b8c90000", "i-0e5f6a7b8c9d00009")
 ALL_HOSTS = [*WEB, *APP, DB, BASTION]
 
 RESOLVER = "10.0.0.2"
@@ -132,7 +134,7 @@ class Flow:
                 "2",
                 ACCOUNT,
                 self.eni.eni,
-                *["-"] * 8,
+                *["-"] * 7,
                 str(int(self.start.timestamp())),
                 str(int(self.start.timestamp()) + 60),
                 "-",
