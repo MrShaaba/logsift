@@ -27,6 +27,11 @@ prefix after a cleanup, a batch role refused on a schedule).
 
 - **Loads** comma, tab, semicolon, pipe and space-delimited files, with quoted fields, a
   byte order mark and gzip. Shows row and column counts and any parse warnings.
+- **Handles large files**: a file streams into DuckDB chunk by chunk, so one bigger than
+  memory still loads, with rows and bytes read shown as it goes. The web UI reads the
+  first 250,000 rows for a quick first look and offers a button for the full pass; loaded
+  files are kept in a local DuckDB database under `data/db/` and are still there after a
+  restart. See [Large files](#large-files).
 - **Recognises the format**: generic CSV, VPC Flow Logs in the default version 2 format,
   custom flow-log formats with a header line (fields up to version 5 such as `tcp-flags`,
   `pkt-srcaddr`, `flow-direction` and `traffic-path`), CloudWatch Logs Insights exports
@@ -124,11 +129,52 @@ uv run logsift inspect samples/cloudtrail_events.csv -v    # summary and finding
 ```
 
 In the browser, drag a file onto the drop zone or pick one. Uploaded files are kept under
-`data/uploads/`, which git ignores. The home page also lists the files in `samples/` so you
-can open one with a click.
+`data/uploads/` and the loaded tables under `data/db/`, both ignored by git, so a file you
+opened yesterday is still there when you start the server today. The home page also lists
+the files in `samples/` so you can open one with a click.
 
-No configuration is needed. `.env.example` lists the optional host, port and data
-directory overrides for `logsift serve`.
+No configuration is needed. `.env.example` lists the optional host, port, data directory
+and sample-size overrides for `logsift serve`.
+
+## Large files
+
+A file is never read into memory whole. The loader sniffs the delimiter and header from
+the first few kilobytes, infers each column's type from the first chunk, then streams the
+rest through DuckDB in 16 MiB chunks of whole lines straight into the typed table, gzip
+included. Memory stays flat however big the file is, and every chunk reports rows and
+bytes read: the CLI prints a progress line on stderr, the web UI shows a bar.
+
+In the web UI a file first loads as a **sample**, the first 250,000 rows, which takes a
+second or two even for a multi-gigabyte log. The overview says so, the profile and
+findings cover only those rows, and **Run the full pass** loads the rest in the
+background while the page shows progress and then reloads itself with everything
+recomputed. `logsift serve --sample-rows N` (or `LOGSIFT_SAMPLE_ROWS`) changes the sample
+size; `logsift inspect --sample N` and `logsift report --sample N` do the same on the
+command line, where the default is the whole file.
+
+![The first look at a 5,000,000-row flow log, with the button for the full pass](docs/screenshot-large.png)
+
+Loaded files live in one DuckDB database file per dataset under `data/db/`, next to a small
+JSON sidecar with what the sniffer and the format detection found. When the server starts
+it reopens them in about a second instead of reloading the files; a sampled file can still
+run its full pass later as long as the original file is where it was. **Close** removes
+the database, the sidecar and, for an upload, the uploaded copy.
+
+To try it on something big, generate a day of flow logs for the same fictional VPC as the
+samples (seeded, written to `data/`, which git ignores, never committed):
+
+```bash
+uv run python scripts/generate_big_flow_log.py                  # 5,000,000 rows, about 550 MB, 30 s
+uv run python scripts/generate_big_flow_log.py --rows 20000000  # or as many as you like
+uv run python scripts/generate_big_flow_log.py --format custom --gzip --rows 1000000
+uv run logsift serve --open data/big_vpc_flow_logs.log          # first look in a few seconds
+uv run logsift inspect data/big_vpc_flow_logs.log               # the whole file, with progress
+```
+
+The planted problems are the sample's, scaled to a day: the blocked return path, the
+database security group refusing 5432, a web host pushing tens of gigabytes to one public
+address, a thousand-port sweep at 10:00, SYN-only flows, NODATA and SKIPDATA records and a
+twenty minute gap at 13:00.
 
 ## Sample data
 
@@ -184,7 +230,9 @@ Layout:
 
 ```
 src/logsift/
-  loader.py         delimiter and header sniffing, typed loading into DuckDB, parse warnings
+  loader.py         delimiter and header sniffing, chunked typed loading into DuckDB with
+                    progress and a resumable row limit, parse warnings
+  store.py          one DuckDB file and one JSON sidecar per loaded dataset under data/db/
   formats/          one plug-in per format
     base.py         Format, FormatInfo and the FormatPlugin interface
     __init__.py     the ordered registry (PLUGINS) and detect_format
@@ -196,14 +244,16 @@ src/logsift/
                     each with __init__.py (detector), table.py (typed table), findings.py (rules)
   insights/base.py  Finding, Severity and Table, and the text helpers the rules share
   sql.py            identifier and literal quoting
-  dataset.py        a loaded file: connection, format, table, profile, findings
+  dataset.py        a loaded file: connection, format, table, profile, findings, the sample
+                    and the background full pass, saving to and restoring from the store
   profile.py        per-column profile and the plain-English summary
   explore.py        paginated search and filter queries
   export.py         CSV, JSON and .xlsx writers
   report.py         self-contained HTML report
   web/              FastAPI app, Jinja2 templates, vendored HTMX and CSS
   cli.py            logsift serve | report | inspect
-scripts/generate_samples.py
+scripts/generate_samples.py        the fictional samples, seeded
+scripts/generate_big_flow_log.py   a multi-million-row flow log on demand, seeded, never committed
 samples/
 tests/
 ```

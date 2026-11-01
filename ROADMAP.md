@@ -35,12 +35,30 @@ are done; everything else is not started.
 
 ## Large files
 
-- [ ] Stream files larger than memory through DuckDB in chunks instead of one `CREATE
-      TABLE AS`
-- [ ] Sample the first N rows for the profile and findings, then let the user run the full
-      pass on demand
-- [ ] Progress reporting during load (rows read, bytes read) in the web UI and the CLI
-- [ ] Persist loaded files to an on-disk DuckDB database so a restart does not reload them
+- [x] Stream files larger than memory through DuckDB in chunks instead of one `CREATE
+      TABLE AS`. `loader.py` infers types from the first chunk and streams 16 MiB chunks of
+      whole lines (staged in a temp file, gzip included) straight into the typed table.
+      Not covered yet: a `memory_limit` for DuckDB's own query memory (the defaults spill
+      to the database's temp directory), cancelling a pass that is under way, and reading
+      several files into one dataset
+- [x] Sample the first N rows for the profile and findings, then let the user run the full
+      pass on demand. 250,000 rows by default in the web UI (`--sample-rows`), `--sample N`
+      on the CLI, the full pass resumes from the byte offset the sample stopped at. Not
+      covered yet: a random sample rather than the head of the file, and findings that say
+      how much the sample can be trusted (a port sweep at 10:00 is invisible in the first
+      hour)
+- [x] Progress reporting during load (rows read, bytes read) in the web UI and the CLI.
+      The overview polls a progress panel every second during the full pass; the CLI
+      rewrites a line on a terminal and prints one every two seconds on a pipe. Not
+      covered yet: progress for the browser upload itself, and for the first (sample)
+      load, which is short by construction and still blocks the request
+- [x] Persist loaded files to an on-disk DuckDB database so a restart does not reload
+      them. `store.py` keeps `data/db/<id>.duckdb` and a JSON sidecar per dataset; the
+      server restores them on start and skips a preload it already holds. Not covered yet:
+      caching the profile and findings themselves (they are recomputed on first view
+      after a restart), compacting the database file after the full pass, showing disk
+      use per dataset on the home page, and a sidecar format version bump path beyond
+      "drop and reload"
 
 ## Saved investigations
 
