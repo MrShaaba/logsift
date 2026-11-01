@@ -8,8 +8,22 @@
   <span class="muted">({{ ds.format.reasons | join('; ') }})</span>
 </p>
 
+{% if ds.loading or ds.status.phase == "failed" %}
+{% include "_progress.html" %}
+{% elif ds.is_sample %}
+<div class="notice info">
+  <strong>Showing the first {{ ds.rows | num }} rows</strong>, about {{ (ds.fraction_loaded * 100) | round | int }}% of the file.
+  The profile and findings below cover only these rows.
+  {% if ds.source_available %}
+  <form method="post" action="/d/{{ ds.id }}/full" style="display:inline;margin-left:8px"><button class="btn small" type="submit">Run the full pass</button></form>
+  {% else %}
+  The original file is no longer where it was, so the rest cannot be loaded.
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="grid cols-4" style="margin-top:12px">
-  <div class="card stat"><span class="label">Rows</span><span class="value">{{ ds.rows | num }}</span></div>
+  <div class="card stat"><span class="label">Rows{% if ds.is_sample %} (sample){% endif %}</span><span class="value">{{ ds.rows | num }}</span></div>
   <div class="card stat"><span class="label">Columns</span><span class="value">{{ ds.columns | length }}</span></div>
   <div class="card stat"><span class="label">File size</span><span class="value">{{ ds.size_bytes | size }}</span></div>
   <div class="card stat"><span class="label">Parse warnings</span><span class="value">{{ ds.load.warnings | length }}</span></div>

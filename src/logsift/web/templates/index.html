@@ -30,6 +30,7 @@
 
 {% if datasets %}
 <h2>Loaded files</h2>
+<p class="muted">Kept in a local DuckDB database under <code>{{ store_dir }}</code>, so they are still here after a restart.</p>
 <div class="card">
   <ul class="plain">
   {% for d in datasets %}
@@ -38,6 +39,7 @@
         <a href="/d/{{ d.id }}"><strong>{{ d.name }}</strong></a>
         <span class="muted">{{ d.rows | num }} rows, {{ d.columns | length }} columns</span>
         <span class="pill">{{ d.format.label }}</span>
+        {% if d.loading %}<span class="pill busy">loading…</span>{% elif d.is_sample %}<span class="pill busy">first {{ d.rows | num }} rows</span>{% endif %}
       </span>
       <span>
         <a class="btn small secondary" href="/d/{{ d.id }}">Overview</a>

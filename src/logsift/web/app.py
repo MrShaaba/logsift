@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from logsift.dataset import Dataset
+from logsift.dataset import SAMPLE_ROWS, Dataset
 from logsift.explore import MAX_EXPORT_ROWS, RowQuery, fetch_all, fetch_page
 from logsift.export import (
     CONTENT_TYPES,
@@ -22,6 +22,7 @@ from logsift.export import (
     rows_to_json,
     rows_to_xlsx,
 )
+from logsift.store import Store
 from logsift.web.render import make_env
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -29,14 +30,33 @@ SAMPLE_SUFFIXES = {".csv", ".tsv", ".txt", ".log", ".gz", ".psv"}
 
 
 class Registry:
-    def __init__(self, data_dir: Path, samples_dir: Path | None) -> None:
+    """The loaded files, backed by an on-disk store so a restart brings them back."""
+
+    def __init__(self, data_dir: Path, samples_dir: Path | None, sample_rows: int) -> None:
         self.data_dir = data_dir
         self.samples_dir = samples_dir
+        self.sample_rows = sample_rows
+        self.store = Store(data_dir / "db")
         self.datasets: dict[str, Dataset] = {}
+        for ds in Dataset.restore_all(self.store):
+            self.datasets[ds.id] = ds
 
-    def add(self, ds: Dataset) -> Dataset:
+    def open(self, path: Path, name: str | None = None) -> Dataset:
+        """Load the first ``sample_rows`` rows of a file and keep it."""
+        ds = Dataset.open(path, name=name, store=self.store, limit=self.sample_rows)
         self.datasets[ds.id] = ds
         return ds
+
+    def holds(self, path: Path) -> bool:
+        """True when a dataset was already loaded from this very file."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        return any(
+            ds.path.resolve() == path.resolve() and ds.size_bytes == size
+            for ds in self.datasets.values()
+        )
 
     def get(self, ds_id: str) -> Dataset:
         ds = self.datasets.get(ds_id)
@@ -45,10 +65,14 @@ class Registry:
         return ds
 
     def remove(self, ds_id: str) -> None:
-        ds = self.datasets.pop(ds_id, None)
+        ds = self.datasets.get(ds_id)
         if ds is None:
             return
+        if ds.loading:
+            raise HTTPException(409, "That file is still loading. Wait for it to finish first.")
+        del self.datasets[ds_id]
         ds.close()
+        self.store.remove(ds_id)
         uploads = self.data_dir / "uploads"
         if uploads in ds.path.parents:
             ds.path.unlink(missing_ok=True)
@@ -67,16 +91,19 @@ def create_app(
     data_dir: Path | str = "data",
     samples_dir: Path | str | None = "samples",
     preload: list[Path] | None = None,
+    sample_rows: int = SAMPLE_ROWS,
 ) -> FastAPI:
+    """The application. ``sample_rows`` is how much of a file loads before the first look."""
     data_dir = Path(data_dir)
     (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
-    registry = Registry(data_dir, Path(samples_dir) if samples_dir else None)
+    registry = Registry(data_dir, Path(samples_dir) if samples_dir else None, sample_rows)
     env = make_env()
     app = FastAPI(title="logsift", docs_url=None, redoc_url=None)
     app.state.registry = registry
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     for p in preload or []:
-        registry.add(Dataset.open(p))
+        if not registry.holds(p):  # restored from the store already
+            registry.open(p)
 
     def render(template: str, **ctx: object) -> HTMLResponse:
         return HTMLResponse(env.get_template(template).render(**ctx))
@@ -118,6 +145,7 @@ def create_app(
             datasets=list(registry.datasets.values()),
             samples=registry.samples(),
             data_dir=str(data_dir / "uploads"),
+            store_dir=str(registry.store.root),
         )
 
     @app.post("/upload")
@@ -126,7 +154,7 @@ def create_app(
         target = data_dir / "uploads" / f"{uuid.uuid4().hex[:8]}_{name}"
         with target.open("wb") as fh:
             shutil.copyfileobj(file.file, fh)
-        ds = registry.add(Dataset.open(target, name=name))
+        ds = registry.open(target, name=name)
         return RedirectResponse(f"/d/{ds.id}", status_code=303)
 
     @app.post("/load-sample")
@@ -136,13 +164,31 @@ def create_app(
         path = registry.samples_dir / Path(name).name
         if not path.is_file():
             raise HTTPException(404, "Unknown sample.")
-        ds = registry.add(Dataset.open(path))
+        ds = registry.open(path)
         return RedirectResponse(f"/d/{ds.id}", status_code=303)
 
     @app.post("/d/{ds_id}/close")
     def close(ds_id: str) -> RedirectResponse:
         registry.remove(ds_id)
         return RedirectResponse("/", status_code=303)
+
+    @app.post("/d/{ds_id}/full")
+    def full_pass(ds_id: str) -> RedirectResponse:
+        """Load the rest of a sampled file in the background; the overview shows progress."""
+        ds = registry.get(ds_id)
+        if ds.is_sample and not ds.loading and not ds.source_available:
+            raise HTTPException(409, "The original file is gone, so the rest cannot be loaded.")
+        ds.start_full_pass()
+        return RedirectResponse(f"/d/{ds.id}", status_code=303)
+
+    @app.get("/d/{ds_id}/progress", response_class=HTMLResponse)
+    def progress(ds_id: str) -> HTMLResponse:
+        """The progress panel the overview polls; once the pass is done it reloads the page."""
+        ds = registry.get(ds_id)
+        page = render("_progress.html", ds=ds)
+        if not ds.loading:
+            page.headers["HX-Refresh"] = "true"
+        return page
 
     @app.get("/d/{ds_id}", response_class=HTMLResponse)
     def overview(ds_id: str) -> HTMLResponse:

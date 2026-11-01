@@ -153,3 +153,72 @@ def test_s3_overview_explore_and_export(client: TestClient) -> None:
     rows = client.get(f"{url}/export/rows.csv?finding=anonymous-reads").text.splitlines()
     assert len(rows) == 16 and rows[0].startswith("time,remote_ip,principal,operation,key")
     assert client.get(f"{url}/export/findings.xlsx").status_code == 200
+
+
+def test_sample_full_pass_progress_and_restart(tmp_path: Path, samples: Path) -> None:
+    data = tmp_path / "data"
+    app = create_app(data_dir=data, samples_dir=samples, sample_rows=2000)
+    client = TestClient(app)
+    r = client.post(
+        "/load-sample", data={"name": "vpc_flow_logs_custom_v5.log"}, follow_redirects=False
+    )
+    url = r.headers["location"]
+    ds_id = url.rsplit("/", 1)[1]
+    page = client.get(url)
+    assert "Showing the first 2,000 rows" in page.text
+    assert "Run the full pass" in page.text and "Rows (sample)" in page.text
+    assert "first 2,000 rows" in client.get("/").text
+    assert client.get(f"{url}/rows").status_code == 200
+
+    r = client.post(f"{url}/full", follow_redirects=False)
+    assert r.status_code == 303
+    registry = app.state.registry
+    ds = registry.get(ds_id)
+    # While the pass runs the panel polls, and closing the file is refused.
+    if ds.loading:
+        assert client.post(f"{url}/close", follow_redirects=False).status_code == 409
+        panel = client.get(f"{url}/progress")
+        assert 'hx-trigger="every 1s"' in panel.text and "HX-Refresh" not in panel.headers
+    ds.wait(60)
+    panel = client.get(f"{url}/progress")
+    assert panel.headers.get("HX-Refresh") == "true" and "Loaded 8,657 rows" in panel.text
+    page = client.get(url)
+    assert "8,657" in page.text and "Showing the first" not in page.text
+    assert "Return traffic blocked" in page.text
+    assert client.get(f"{url}/rows?finding=asymmetric").status_code == 200
+    assert "of 1,280" in client.get(f"{url}/explore?finding=asymmetric").text
+    # Nothing to do now: the button is gone and a second request is a plain redirect.
+    assert client.post(f"{url}/full", follow_redirects=False).status_code == 303
+
+    # A new process picks the file up from the store without reloading it.
+    again = create_app(
+        data_dir=data,
+        samples_dir=samples,
+        sample_rows=2000,
+        preload=[samples / "vpc_flow_logs_custom_v5.log"],
+    )
+    client2 = TestClient(again)
+    home = client2.get("/")
+    assert home.text.count("vpc_flow_logs_custom_v5.log</strong>") == 1  # preload was a no-op
+    assert again.state.registry.get(ds_id).rows == 8657
+    assert "Return traffic blocked" in client2.get(url).text
+    assert client2.post(f"{url}/close", follow_redirects=False).status_code == 303
+    assert client2.get(url).status_code == 404
+    assert not (data / "db" / f"{ds_id}.duckdb").exists()
+
+
+def test_uploads_survive_a_restart_and_close_removes_them(tmp_path: Path, samples: Path) -> None:
+    data = tmp_path / "data"
+    client = TestClient(create_app(data_dir=data, samples_dir=None))
+    with (samples / "daily_sales.csv").open("rb") as fh:
+        r = client.post(
+            "/upload", files={"file": ("sales.csv", fh, "text/csv")}, follow_redirects=False
+        )
+    url = r.headers["location"]
+    uploads = list((data / "uploads").iterdir())
+    assert len(uploads) == 1
+    client2 = TestClient(create_app(data_dir=data, samples_dir=None))
+    assert "sales.csv" in client2.get("/").text
+    assert client2.get(url).status_code == 200
+    client2.post(f"{url}/close")
+    assert not uploads[0].exists() and list((data / "db").glob("*.duckdb")) == []

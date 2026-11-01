@@ -45,8 +45,10 @@ def render_report(ds: Dataset) -> str:
     )
 
 
-def write_report(path: Path, out: Path | None = None) -> Path:
-    ds = Dataset.open(path)
+def write_report(
+    path: Path, out: Path | None = None, *, limit: int | None = None, progress: Any = None
+) -> Path:
+    ds = Dataset.open(path, limit=limit, progress=progress)
     try:
         html = render_report(ds)
     finally:

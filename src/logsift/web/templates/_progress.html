@@ -1,0 +1,16 @@
+<div id="progress" class="notice info progress"{% if ds.loading %} hx-get="/d/{{ ds.id }}/progress" hx-trigger="every 1s" hx-swap="outerHTML"{% endif %}>
+{% if ds.status.phase == "reading" %}
+  <strong>Loading the whole file…</strong>
+  <span class="mono">{{ ds.status.rows | num }} rows, {{ ds.status.bytes_read | size }} of {{ ds.status.total_bytes | size }} ({{ (ds.status.fraction * 100) | round | int }}%)</span>
+  <progress max="1000" value="{{ (ds.status.fraction * 1000) | int }}"></progress>
+{% elif ds.status.phase == "building" %}
+  <strong>Building the {{ ds.format.table }} table and re-running the rules…</strong>
+  <span class="mono">{{ ds.status.rows | num }} rows loaded</span>
+  <progress max="1000" value="1000"></progress>
+{% elif ds.status.phase == "failed" %}
+  <strong>The full pass failed:</strong> {{ ds.status.error }}
+  <form method="post" action="/d/{{ ds.id }}/full" style="display:inline;margin-left:8px"><button class="btn small" type="submit">Try again</button></form>
+{% else %}
+  <strong>Loaded {{ ds.rows | num }} rows.</strong> Refreshing…
+{% endif %}
+</div>

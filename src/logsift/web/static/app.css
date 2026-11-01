@@ -44,6 +44,8 @@ p.muted, .muted { color: var(--muted); }
   font-size: 12px; color: var(--muted); background: var(--bg); margin-right: 6px; }
 .notice { border-left: 4px solid var(--medium); background: #fff8ec; padding: 10px 14px; border-radius: 6px; margin: 8px 0; }
 .notice.info { border-color: var(--low); background: #eef5fd; }
+.notice.progress progress { display: block; width: 100%; height: 8px; margin-top: 8px; accent-color: var(--accent); }
+.pill.busy { border-color: var(--medium); color: var(--medium); }
 .notice ul { margin: 4px 0 0 18px; padding: 0; }
 .dropzone {
   border: 2px dashed #b9c2d0; border-radius: 12px; padding: 42px 20px; text-align: center;

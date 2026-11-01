@@ -13,6 +13,7 @@
   <div class="card stat"><span class="label">File size</span><span class="value">{{ ds.size_bytes | size }}</span></div>
   <div class="card stat"><span class="label">Parse warnings</span><span class="value">{{ ds.load.warnings | length }}</span></div>
 </div>
+{% if ds.is_sample %}<div class="notice info"><strong>This report covers the first {{ ds.rows | num }} rows</strong>, about {{ (ds.fraction_loaded * 100) | round | int }}% of the file.</div>{% endif %}
 {% if ds.load.warnings %}<div class="notice"><strong>Parse warnings</strong><ul>{% for w in ds.load.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div>{% endif %}
 {% if ds.load.notes %}<div class="notice info"><ul>{% for n in ds.load.notes %}<li>{{ n }}</li>{% endfor %}</ul></div>{% endif %}
 
