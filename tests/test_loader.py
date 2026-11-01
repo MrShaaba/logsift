@@ -112,3 +112,96 @@ def test_no_header_names_columns(tmp_path: Path) -> None:
     res = load(duckdb.connect(), write(tmp_path, "nh.csv", "1,2,3\n4,5,6\n"))
     assert [c.name for c in res.columns] == ["column_1", "column_2", "column_3"]
     assert any("No header row" in n for n in res.notes)
+
+
+def numbered(n: int, header: str = "n,word\n") -> str:
+    return header + "".join(f"{i},w{i}\n" for i in range(n))
+
+
+def test_small_chunks_keep_row_order_and_match_a_single_chunk(tmp_path: Path) -> None:
+    text = numbered(5000)
+    path = write(tmp_path, "many.csv", text)
+    one = duckdb.connect()
+    whole = load(one, path)
+    many = duckdb.connect()
+    seen: list[tuple[int, int]] = []
+    res = load(many, path, chunk_bytes=4096, progress=lambda p: seen.append((p.rows, p.bytes_read)))
+    assert res.rows == whole.rows == 5000
+    assert [c.sql_type for c in res.columns] == [c.sql_type for c in whole.columns]
+    assert res.complete and res.bytes_read == path.stat().st_size
+    assert len(seen) > 5
+    assert seen == sorted(seen) and seen[-1] == (5000, path.stat().st_size)
+    order = [r[0] for r in many.execute("SELECT n FROM raw").fetchall()]
+    assert order == list(range(5000))
+
+
+def test_limit_stops_early_and_load_more_resumes(tmp_path: Path) -> None:
+    from logsift.loader import load_more, sniff
+
+    path = write(tmp_path, "limited.csv", numbered(3000))
+    sn = sniff(path)
+    con = duckdb.connect()
+    res = load(con, path, sn, limit=1000, chunk_bytes=2048)
+    assert res.rows == 1000 and not res.complete
+    assert 0 < res.bytes_read < path.stat().st_size
+    assert con.execute("SELECT max(n) FROM raw").fetchone() == (999,)
+    load_more(con, path, sn, res, chunk_bytes=2048)
+    assert res.rows == 3000 and res.complete
+    assert res.bytes_read == path.stat().st_size
+    assert [r[0] for r in con.execute("SELECT n FROM raw").fetchall()] == list(range(3000))
+    # Resuming a complete load is a no-op.
+    assert load_more(con, path, sn, res) is res and res.rows == 3000
+
+
+def test_limit_on_the_last_row_is_complete(tmp_path: Path) -> None:
+    path = write(tmp_path, "exact.csv", numbered(100))
+    res = load(duckdb.connect(), path, limit=100)
+    assert res.rows == 100 and res.complete
+
+
+def test_gzip_loads_in_chunks_and_resumes(tmp_path: Path) -> None:
+    from logsift.loader import load_more, sniff
+
+    path = write(tmp_path, "many.csv.gz", numbered(4000), gz=True)
+    sn = sniff(path)
+    con = duckdb.connect()
+    res = load(con, path, sn, limit=1500, chunk_bytes=8192)
+    assert res.rows == 1500 and not res.complete
+    assert res.bytes_read <= path.stat().st_size
+    load_more(con, path, sn, res, chunk_bytes=8192)
+    assert res.rows == 4000 and res.complete and res.bytes_read == path.stat().st_size
+    assert [r[0] for r in con.execute("SELECT n FROM raw").fetchall()] == list(range(4000))
+
+
+def test_quoted_newline_is_not_split_across_chunks(tmp_path: Path) -> None:
+    rows = [f'{i},"line one\nline two {i}"\n' for i in range(400)]
+    path = write(tmp_path, "multiline.csv", "n,text\n" + "".join(rows))
+    con = duckdb.connect()
+    res = load(con, path, chunk_bytes=1024)
+    assert res.rows == 400 and res.rejected_lines == 0
+    assert con.execute("SELECT text FROM raw WHERE n = 7").fetchone() == ("line one\nline two 7",)
+
+
+def test_bad_values_and_rejects_add_up_across_chunks(tmp_path: Path) -> None:
+    lines = ["n,v\n"]
+    for i in range(2000):
+        if i % 500 == 7:
+            lines.append(f"{i},oops\n")  # not an integer
+        elif i % 700 == 3:
+            lines.append(f"{i},1,2,3\n")  # too many fields
+        else:
+            lines.append(f"{i},{i * 2}\n")
+    path = write(tmp_path, "mixed.csv", "".join(lines))
+    res = load(duckdb.connect(), path, chunk_bytes=2048)
+    v = next(c for c in res.columns if c.name == "v")
+    assert v.sql_type == "BIGINT" and v.bad_values == 4
+    assert res.rejected_lines == 3
+    assert res.rows == 2000 - 3
+    assert any(w.startswith("3 lines could not be parsed") for w in res.warnings)
+    assert any("Column v: 4 values" in w for w in res.warnings)
+    assert res.reject_examples[0][0] == 5  # header is line 1, i=3 is line 5
+
+
+def test_empty_file_and_header_only(tmp_path: Path) -> None:
+    res = load(duckdb.connect(), write(tmp_path, "header.csv", "a,b\n"))
+    assert res.rows == 0 and res.complete and [c.name for c in res.columns] == ["a", "b"]

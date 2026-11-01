@@ -1,9 +1,13 @@
-"""Sniff a delimited file and load it into DuckDB.
+"""Sniff a delimited file and stream it into DuckDB.
 
 The loader never trusts DuckDB's own dialect sniffer: it works out the delimiter and
-header itself from the first few kilobytes, loads every column as text with explicit
-column names, then infers a type per column and casts. Anything that does not fit is
-counted and reported as a warning instead of failing the whole load.
+header itself from the first few kilobytes, infers a type per column from the first
+chunk, then streams the file through DuckDB chunk by chunk, casting as it goes. A chunk
+is a few megabytes of whole lines staged in a temporary file, so a file far larger than
+memory loads in bounded memory, progress (rows and bytes) is reported after every chunk,
+and a load can stop after the first N rows and be resumed later from the same offset.
+Anything that does not fit its type is counted and reported as a warning instead of
+failing the whole load.
 """
 
 from __future__ import annotations
@@ -12,12 +16,17 @@ import csv
 import gzip
 import io
 import re
+import tempfile
+import uuid
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
 import duckdb
+
+from logsift.sql import lit, q
 
 SAMPLE_BYTES = 256 * 1024
 SAMPLE_LINES = 200
@@ -30,6 +39,9 @@ DELIMITERS: dict[str, str] = {
 }
 CAST_THRESHOLD = 0.995
 INFER_SAMPLE_ROWS = 50_000
+# Whole lines are read in chunks of about this many bytes and staged in a temp file.
+CHUNK_BYTES = 16 * 1024 * 1024
+REJECT_EXAMPLES = 3
 
 NUMERIC_RE = re.compile(r"^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$")
 LEADING_ZERO_RE = re.compile(r"^0\d+$")
@@ -61,6 +73,29 @@ class ColumnType:
 
 
 @dataclass
+class LoadProgress:
+    """How far a load has got, reported after every chunk."""
+
+    rows: int = 0
+    bytes_read: int = 0
+    total_bytes: int = 0
+    # reading | building | ready | failed
+    phase: str = "reading"
+    error: str = ""
+
+    @property
+    def fraction(self) -> float:
+        if self.phase == "ready":
+            return 1.0
+        if not self.total_bytes:
+            return 0.0
+        return min(1.0, self.bytes_read / self.total_bytes)
+
+
+ProgressFn = Callable[[LoadProgress], None]
+
+
+@dataclass
 class LoadResult:
     table: str
     rows: int
@@ -68,6 +103,31 @@ class LoadResult:
     rejected_lines: int
     warnings: list[str]
     notes: list[str]
+    # Where the stream stopped: uncompressed bytes into the file, lines after the header,
+    # and bytes of the file on disk consumed (compressed size for gzip).
+    offset: int = 0
+    lines: int = 0
+    bytes_read: int = 0
+    # False when a row limit stopped the load before the end of the file.
+    complete: bool = True
+    sniff_warnings: list[str] = field(default_factory=list)
+    reject_examples: list[tuple[int, str, str]] = field(default_factory=list)
+
+    def refresh_warnings(self) -> None:
+        """Rebuild ``warnings`` from the counts, after each pass over the file."""
+        out = list(self.sniff_warnings)
+        if self.rejected_lines:
+            shown = "; ".join(
+                f"line {ln}: {err.lower()} ({text[:60]})" for ln, err, text in self.reject_examples
+            )
+            out.append(f"{self.rejected_lines} lines could not be parsed and were skipped. {shown}")
+        for t in self.columns:
+            if t.bad_values:
+                out.append(
+                    f"Column {t.name}: {t.bad_values} values could not be read as "
+                    f"{t.sql_type.lower()} and were left blank."
+                )
+        self.warnings = out
 
 
 def is_gzip(path: Path) -> bool:
@@ -194,46 +254,6 @@ def sniff(path: Path) -> Sniff:
     )
 
 
-def _q(ident: str) -> str:
-    return '"' + ident.replace('"', '""') + '"'
-
-
-def _lit(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def load_text(
-    con: duckdb.DuckDBPyConnection,
-    path: Path,
-    sn: Sniff,
-    table: str = "raw_text",
-    null_strings: tuple[str, ...] = ("",),
-) -> int:
-    """Load every column as VARCHAR into ``table``. Returns the number of rejected lines."""
-    cols = ", ".join(f"{_lit(c)}: 'VARCHAR'" for c in sn.columns)
-    nulls = ", ".join(_lit(n) for n in null_strings)
-    con.execute(f"DROP TABLE IF EXISTS {_q(table)}")
-    con.execute(
-        f"""
-        CREATE TABLE {_q(table)} AS
-        SELECT * FROM read_csv(
-            {_lit(str(path))},
-            delim={_lit(sn.delimiter)},
-            header={"true" if sn.has_header else "false"},
-            columns={{{cols}}},
-            auto_detect=false,
-            quote='"',
-            escape='"',
-            nullstr=[{nulls}],
-            null_padding=true,
-            ignore_errors=true,
-            store_rejects=true
-        )
-        """
-    )
-    return con.execute("SELECT count(*) FROM reject_errors").fetchone()[0]  # type: ignore[index]
-
-
 INT_RE = "^[-+]?[0-9]+$"
 DATE_RE = "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 BOOL_WORDS = ("true", "false", "t", "f", "yes", "no", "y", "n")
@@ -247,22 +267,22 @@ def infer_types(con: duckdb.DuckDBPyConnection, table: str, columns: list[str]) 
     """
     if not columns:
         return []
-    bools = ", ".join(_lit(b) for b in BOOL_WORDS)
+    bools = ", ".join(lit(b) for b in BOOL_WORDS)
     exprs: list[str] = []
     for c in columns:
-        q = _q(c)
+        qc = q(c)
         exprs += [
-            f"count({q})",
-            f"count(*) FILTER (WHERE regexp_matches(trim({q}), {_lit(INT_RE)}))",
-            f"count(try_cast({q} AS DOUBLE))",
-            f"count(*) FILTER (WHERE regexp_matches(trim({q}), {_lit(DATE_RE)}) "
-            f"AND try_cast({q} AS DATE) IS NOT NULL)",
-            f"count(try_cast({q} AS TIMESTAMP))",
-            f"count(*) FILTER (WHERE regexp_matches(trim({q}), '^0[0-9]+$'))",
-            f"count(*) FILTER (WHERE lower(trim({q})) IN ({bools}))",
+            f"count({qc})",
+            f"count(*) FILTER (WHERE regexp_matches(trim({qc}), {lit(INT_RE)}))",
+            f"count(try_cast({qc} AS DOUBLE))",
+            f"count(*) FILTER (WHERE regexp_matches(trim({qc}), {lit(DATE_RE)}) "
+            f"AND try_cast({qc} AS DATE) IS NOT NULL)",
+            f"count(try_cast({qc} AS TIMESTAMP))",
+            f"count(*) FILTER (WHERE regexp_matches(trim({qc}), '^0[0-9]+$'))",
+            f"count(*) FILTER (WHERE lower(trim({qc})) IN ({bools}))",
         ]
     sql = (
-        f"SELECT {', '.join(exprs)} FROM (SELECT * FROM {_q(table)} "
+        f"SELECT {', '.join(exprs)} FROM (SELECT * FROM {q(table)} "
         f"USING SAMPLE reservoir({INFER_SAMPLE_ROWS} ROWS) REPEATABLE (7))"
     )
     row = con.execute(sql).fetchone() or ()
@@ -301,44 +321,209 @@ def _pick_type(
     return "VARCHAR"
 
 
-def materialise(
-    con: duckdb.DuckDBPyConnection,
-    source: str,
-    target: str,
-    types: list[ColumnType],
-) -> None:
-    """Create ``target`` from ``source`` with each column cast to its inferred type."""
-    selects: list[str] = []
-    for t in types:
-        q = _q(t.name)
-        if t.sql_type == "VARCHAR":
-            selects.append(q)
-        elif t.sql_type == "BOOLEAN":
-            selects.append(
-                f"CASE lower(trim({q})) WHEN 'true' THEN true WHEN 't' THEN true "
-                f"WHEN 'yes' THEN true WHEN 'y' THEN true WHEN 'false' THEN false "
-                f"WHEN 'f' THEN false WHEN 'no' THEN false WHEN 'n' THEN false END AS {q}"
-            )
-        else:
-            selects.append(f"try_cast({q} AS {t.sql_type}) AS {q}")
-    con.execute(f"DROP TABLE IF EXISTS {_q(target)}")
-    con.execute(f"CREATE TABLE {_q(target)} AS SELECT {', '.join(selects)} FROM {_q(source)}")
-    # Count values that were present but could not be read as the chosen type.
-    checks = [
-        f"count(*) FILTER (WHERE s.{_q(t.name)} IS NOT NULL AND t.{_q(t.name)} IS NULL)"
-        for t in types
-        if t.sql_type != "VARCHAR"
-    ]
-    if checks:
-        sql = (
-            f"SELECT {', '.join(checks)} FROM (SELECT row_number() OVER () AS rn, * "
-            f"FROM {_q(source)}) s JOIN (SELECT row_number() OVER () AS rn, * "
-            f"FROM {_q(target)}) t USING (rn)"
+def cast_expr(t: ColumnType) -> str:
+    """The expression that reads the text column ``t.name`` as its inferred type."""
+    qc = q(t.name)
+    if t.sql_type == "VARCHAR":
+        return qc
+    if t.sql_type == "BOOLEAN":
+        return (
+            f"CASE lower(trim({qc})) WHEN 'true' THEN true WHEN 't' THEN true "
+            f"WHEN 'yes' THEN true WHEN 'y' THEN true WHEN 'false' THEN false "
+            f"WHEN 'f' THEN false WHEN 'no' THEN false WHEN 'n' THEN false END"
         )
-        counts = con.execute(sql).fetchone() or ()
-        typed = [t for t in types if t.sql_type != "VARCHAR"]
-        for t, n in zip(typed, counts, strict=True):
-            t.bad_values = int(n)
+    return f"try_cast({qc} AS {t.sql_type})"
+
+
+# ------------------------------------------------------------------ streaming
+
+
+class ChunkReader:
+    """Read a possibly gzipped file as chunks of whole lines, resumable by byte offset.
+
+    ``offset`` counts uncompressed bytes from the start of the file, so a later reader can
+    pick up exactly where this one stopped. ``bytes_read`` is how much of the file on disk
+    has been consumed, for progress reporting.
+    """
+
+    def __init__(
+        self, path: Path, sn: Sniff, offset: int = 0, chunk_bytes: int = CHUNK_BYTES
+    ) -> None:
+        self.size = path.stat().st_size
+        self.chunk_bytes = chunk_bytes
+        self.raw = path.open("rb")
+        self.fh: IO[bytes] = gzip.GzipFile(fileobj=self.raw) if sn.gzip else self.raw
+        self.gzip = sn.gzip
+        self.truncated = False
+        if offset:
+            self.fh.seek(offset)
+        else:
+            if sn.bom:
+                self.fh.read(3)
+            if sn.has_header:
+                self.fh.readline()
+            offset = self.fh.tell()
+        self.offset = offset
+
+    def read(self, max_lines: int | None = None) -> list[bytes]:
+        """The next chunk of lines, at most ``max_lines`` of them; empty at the end."""
+        lines = self.fh.readlines(self.chunk_bytes)
+        # Never split a quoted field that spans lines across two chunks.
+        while lines and _odd_quotes(lines):
+            more = self.fh.readline()
+            if not more:
+                break
+            lines.append(more)
+        if max_lines is not None and len(lines) > max_lines:
+            keep = max_lines
+            while keep < len(lines) and _odd_quotes(lines[:keep]):
+                keep += 1
+            lines = lines[:keep]
+            self.offset += sum(len(ln) for ln in lines)
+            self.fh.seek(self.offset)
+            self.truncated = True
+            return lines
+        self.offset += sum(len(ln) for ln in lines)
+        return lines
+
+    def at_end(self) -> bool:
+        return not self.fh.peek(1)  # type: ignore[attr-defined]
+
+    @property
+    def bytes_read(self) -> int:
+        pos = self.raw.tell() if self.gzip else self.offset
+        return min(pos, self.size)
+
+    def close(self) -> None:
+        if self.gzip:
+            self.fh.close()
+        self.raw.close()
+
+
+def _odd_quotes(lines: list[bytes]) -> bool:
+    return sum(ln.count(b'"') for ln in lines) % 2 == 1
+
+
+def read_csv_sql(
+    path: Path, sn: Sniff, null_strings: tuple[str, ...], *, parallel: bool = True
+) -> str:
+    """A ``read_csv`` call that reads ``path`` as text columns named after the sniff.
+
+    DuckDB's parallel reader cannot pad short lines when a quoted field spans lines, so a
+    chunk holding such a field is read serially.
+    """
+    cols = ", ".join(f"{lit(c)}: 'VARCHAR'" for c in sn.columns)
+    nulls = ", ".join(lit(n) for n in null_strings)
+    return (
+        f"read_csv({lit(str(path))}, delim={lit(sn.delimiter)}, header=false, "
+        f"columns={{{cols}}}, auto_detect=false, quote='\"', escape='\"', nullstr=[{nulls}], "
+        f"null_padding=true, ignore_errors=true, store_rejects=true, "
+        f"parallel={'true' if parallel else 'false'})"
+    )
+
+
+# DuckDB would otherwise move the casts into the CSV reader, where a value that does not
+# fit rejects the whole line instead of being left blank and counted.
+PUSHDOWN_OPTIMIZERS = "type_pushdown,scalar_fn_pushdown"
+
+
+def _create_table(
+    con: duckdb.DuckDBPyConnection, res: LoadResult, sn: Sniff, source: str | None
+) -> None:
+    """Infer the column types from the first chunk and create the empty typed table."""
+    if source is None:
+        res.columns = [ColumnType(c, "VARCHAR") for c in sn.columns]
+    else:
+        con.execute(f"CREATE TEMP TABLE head AS SELECT * FROM {source} LIMIT {INFER_SAMPLE_ROWS}")
+        res.columns = infer_types(con, "head", sn.columns)
+        con.execute("DROP TABLE head")
+    decl = ", ".join(f"{q(t.name)} {t.sql_type}" for t in res.columns)
+    con.execute(f"CREATE TABLE {q(res.table)} ({decl})")
+
+
+def _collect_rejects(con: duckdb.DuckDBPyConnection, res: LoadResult, first_line: int) -> None:
+    # Each chunk is scanned more than once (types, insert, bad-value counts) and every
+    # scan records the same rejects, so count each line once.
+    rows = con.execute(
+        "SELECT DISTINCT line, error_type, csv_line FROM reject_errors ORDER BY line"
+    ).fetchall()
+    if not rows:
+        return
+    res.rejected_lines += len(rows)
+    for ln, err, text in rows:
+        if len(res.reject_examples) >= REJECT_EXAMPLES:
+            break
+        res.reject_examples.append((first_line + int(ln) - 1, str(err), str(text or "")))
+    con.execute("DELETE FROM reject_errors")
+
+
+def _stream(
+    con: duckdb.DuckDBPyConnection,
+    path: Path,
+    sn: Sniff,
+    res: LoadResult,
+    *,
+    null_strings: tuple[str, ...],
+    limit: int | None,
+    progress: ProgressFn | None,
+    chunk_bytes: int,
+    workdir: Path | None,
+) -> None:
+    """Append rows to ``res.table`` from ``res.offset`` until the end of the file or ``limit``."""
+    reader = ChunkReader(path, sn, res.offset, chunk_bytes)
+    prog = LoadProgress(rows=res.rows, bytes_read=reader.bytes_read, total_bytes=reader.size)
+    chunk = Path(workdir or tempfile.gettempdir()) / f"logsift-{uuid.uuid4().hex[:12]}.part"
+    header_lines = 1 if sn.has_header else 0
+    con.execute(f"SET disabled_optimizers = {lit(PUSHDOWN_OPTIMIZERS)}")
+    try:
+        while True:
+            remaining = None if limit is None else max(0, limit - res.rows)
+            if remaining == 0:
+                res.complete = reader.at_end()
+                break
+            lines = reader.read(remaining)
+            if not lines:
+                if not res.columns:
+                    _create_table(con, res, sn, None)
+                res.complete = True
+                break
+            chunk.write_bytes(b"".join(lines))
+            multiline = any(ln.count(b'"') % 2 for ln in lines)
+            source = read_csv_sql(chunk, sn, null_strings, parallel=not multiline)
+            if not res.columns:
+                _create_table(con, res, sn, source)
+            casts = ", ".join(cast_expr(t) for t in res.columns)
+            inserted = con.execute(f"INSERT INTO {q(res.table)} SELECT {casts} FROM {source}")
+            res.rows += int((inserted.fetchone() or (0,))[0])
+            typed = [t for t in res.columns if t.sql_type != "VARCHAR"]
+            if typed:
+                checks = ", ".join(
+                    f"count(*) FILTER (WHERE {q(t.name)} IS NOT NULL AND {cast_expr(t)} IS NULL)"
+                    for t in typed
+                )
+                counts = con.execute(f"SELECT {checks} FROM {source}").fetchone() or ()
+                for t, n in zip(typed, counts, strict=True):
+                    t.bad_values += int(n)
+            _collect_rejects(con, res, header_lines + res.lines + 1)
+            res.lines += len(lines)
+            res.offset = reader.offset
+            res.bytes_read = reader.bytes_read
+            prog.rows, prog.bytes_read = res.rows, res.bytes_read
+            if progress:
+                progress(prog)
+            if reader.truncated:
+                res.complete = False
+                break
+        if res.complete:
+            res.bytes_read = reader.size
+            prog.bytes_read = reader.size
+            if progress:
+                progress(prog)
+    finally:
+        con.execute("RESET disabled_optimizers")
+        chunk.unlink(missing_ok=True)
+        reader.close()
+    res.refresh_warnings()
 
 
 def load(
@@ -348,8 +533,16 @@ def load(
     *,
     table: str = "raw",
     null_strings: tuple[str, ...] = ("",),
+    limit: int | None = None,
+    progress: ProgressFn | None = None,
+    chunk_bytes: int = CHUNK_BYTES,
+    workdir: Path | None = None,
 ) -> LoadResult:
-    """Sniff (if needed), load as text, infer types, and materialise a typed table."""
+    """Sniff (if needed), then stream the file into a typed table chunk by chunk.
+
+    With ``limit`` the load stops after about that many rows and ``complete`` is False;
+    :func:`load_more` picks it up again from the same place.
+    """
     path = Path(path)
     sn = sn or sniff(path)
     warnings: list[str] = []
@@ -367,23 +560,46 @@ def load(
             f"{odd} of the first {sum(sn.field_counts.values())} lines do not have "
             f"{common} fields like the rest."
         )
+    res = LoadResult(table, 0, [], 0, [], notes, sniff_warnings=warnings)
+    con.execute(f"DROP TABLE IF EXISTS {q(table)}")
+    _stream(
+        con,
+        path,
+        sn,
+        res,
+        null_strings=null_strings,
+        limit=limit,
+        progress=progress,
+        chunk_bytes=chunk_bytes,
+        workdir=workdir,
+    )
+    return res
 
-    rejected = load_text(con, path, sn, table="raw_text", null_strings=null_strings)
-    if rejected:
-        examples = con.execute(
-            "SELECT line, error_type, csv_line FROM reject_errors ORDER BY line LIMIT 3"
-        ).fetchall()
-        shown = "; ".join(f"line {ln}: {err.lower()} ({text[:60]})" for ln, err, text in examples)
-        warnings.append(f"{rejected} lines could not be parsed and were skipped. {shown}")
 
-    types = infer_types(con, "raw_text", sn.columns)
-    materialise(con, "raw_text", table, types)
-    con.execute('DROP TABLE "raw_text"')
-    for t in types:
-        if t.bad_values:
-            warnings.append(
-                f"Column {t.name}: {t.bad_values} values could not be read as "
-                f"{t.sql_type.lower()} and were left blank."
-            )
-    rows = con.execute(f"SELECT count(*) FROM {_q(table)}").fetchone()[0]  # type: ignore[index]
-    return LoadResult(table, int(rows), types, rejected, warnings, notes)
+def load_more(
+    con: duckdb.DuckDBPyConnection,
+    path: Path,
+    sn: Sniff,
+    res: LoadResult,
+    *,
+    null_strings: tuple[str, ...] = ("",),
+    limit: int | None = None,
+    progress: ProgressFn | None = None,
+    chunk_bytes: int = CHUNK_BYTES,
+    workdir: Path | None = None,
+) -> LoadResult:
+    """Continue a load that stopped at a row limit, appending to the same table."""
+    if res.complete:
+        return res
+    _stream(
+        con,
+        Path(path),
+        sn,
+        res,
+        null_strings=null_strings,
+        limit=limit,
+        progress=progress,
+        chunk_bytes=chunk_bytes,
+        workdir=workdir,
+    )
+    return res
