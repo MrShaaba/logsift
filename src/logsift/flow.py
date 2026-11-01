@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.formats import FLOW_FIELDS, FormatInfo
+from logsift.formats import FormatInfo
+from logsift.formats.vpcflow import FLOW_FIELDS
 from logsift.sql import q
 
 FLOW_TYPES: dict[str, str] = {
@@ -39,7 +40,8 @@ def build_flow_table(
     target: str = "flow",
 ) -> list[str]:
     """Create ``target`` with canonical column names and types. Returns its columns."""
-    if not fmt.is_flow_log:
+    source_kind = fmt.options.get("flow_source", "")
+    if not source_kind:
         raise ValueError("not a flow log")
 
     raw_types = dict(
@@ -55,15 +57,15 @@ def build_flow_table(
         selects.append(f"try_cast({expr} AS {wanted}) AS {q(canon)}")
         present.append(canon)
 
-    if fmt.flow_source == "message":
-        parts = f"string_split({q(fmt.message_column)}, ' ')"
-        for i, canon in enumerate(fmt.flow_columns.values(), start=1):
+    if source_kind == "message":
+        parts = f"string_split({q(fmt.options['message_column'])}, ' ')"
+        for i, canon in enumerate(fmt.columns.values(), start=1):
             add(canon, f"nullif({parts}[{i}], '-')")
         stamp = next((c for c in raw_types if c.lower() in ("@timestamp", "timestamp")), None)
         if stamp:
             selects.append(f"try_cast({q(stamp)} AS TIMESTAMP) AS log_time")
     else:
-        by_canon = {canon: raw for raw, canon in fmt.flow_columns.items()}
+        by_canon = {canon: raw for raw, canon in fmt.columns.items()}
         for canon in CANONICAL_ORDER:
             if canon in by_canon:
                 raw = by_canon[canon]

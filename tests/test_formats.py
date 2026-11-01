@@ -3,7 +3,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from logsift.formats import Format, canonical, detect_format
+from logsift.formats import Format, detect_format
+from logsift.formats.vpcflow import canonical
 from logsift.loader import sniff
 from tests.conftest import write
 
@@ -28,23 +29,25 @@ def test_sample_formats(samples: Path) -> None:
 
 def test_v2_maps_positional_columns(samples: Path) -> None:
     info = detect_format(sniff(samples / "vpc_flow_logs_v2.log"))
-    assert info.flow_source == "columns"
-    assert info.flow_columns["column_4"] == "srcaddr"
-    assert info.flow_columns["column_14"] == "log_status"
+    assert info.plugin == "vpc_flow" and info.table == "flow"
+    assert info.options["flow_source"] == "columns"
+    assert info.columns["column_4"] == "srcaddr"
+    assert info.columns["column_14"] == "log_status"
 
 
 def test_custom_header_maps_v5_fields(samples: Path) -> None:
     info = detect_format(sniff(samples / "vpc_flow_logs_custom_v5.log"))
-    assert info.flow_columns["tcp-flags"] == "tcp_flags"
-    assert info.flow_columns["pkt-srcaddr"] == "pkt_srcaddr"
-    assert info.flow_columns["flow-direction"] == "flow_direction"
-    assert info.flow_columns["traffic-path"] == "traffic_path"
+    assert info.columns["tcp-flags"] == "tcp_flags"
+    assert info.columns["pkt-srcaddr"] == "pkt_srcaddr"
+    assert info.columns["flow-direction"] == "flow_direction"
+    assert info.columns["traffic-path"] == "traffic_path"
 
 
 def test_cloudwatch_message_source(samples: Path) -> None:
     info = detect_format(sniff(samples / "cloudwatch_insights_export.csv"))
-    assert info.flow_source == "message"
-    assert info.message_column == "@message"
+    assert info.plugin == "cloudwatch_insights" and info.table == "flow"
+    assert info.options["flow_source"] == "message"
+    assert info.options["message_column"] == "@message"
 
 
 def test_cloudwatch_parsed_columns_only(tmp_path: Path) -> None:
@@ -53,8 +56,8 @@ def test_cloudwatch_parsed_columns_only(tmp_path: Path) -> None:
     )
     info = detect_format(sniff(write(tmp_path, "cw.csv", text)))
     assert info.kind == Format.CW_INSIGHTS
-    assert info.flow_source == "columns"
-    assert info.flow_columns == {
+    assert info.options["flow_source"] == "columns"
+    assert info.columns == {
         "srcAddr": "srcaddr",
         "dstAddr": "dstaddr",
         "dstPort": "dstport",
@@ -66,7 +69,8 @@ def test_cloudwatch_without_flow_fields_is_not_a_flow_log(tmp_path: Path) -> Non
     text = "@timestamp,@message\n2026-03-10 08:00:00.000,hello world\n"
     info = detect_format(sniff(write(tmp_path, "cw.csv", text)))
     assert info.kind == Format.CW_INSIGHTS
-    assert not info.is_flow_log
+    assert not info.has_rules and info.table == ""
+    assert not info.dash_means_missing
 
 
 def test_tab_separated_custom_flow_log(tmp_path: Path) -> None:
@@ -79,7 +83,7 @@ def test_tab_separated_custom_flow_log(tmp_path: Path) -> None:
 
 def test_generic_is_not_mistaken_for_flow_log(samples: Path) -> None:
     info = detect_format(sniff(samples / "daily_sales.csv"))
-    assert not info.is_flow_log
+    assert info.plugin == "generic" and not info.has_rules
 
 
 def fields_of(line: str) -> list[str]:
@@ -92,18 +96,19 @@ def join_fields(fields: list[str]) -> str:
 
 def test_alb_maps_positional_columns(samples: Path) -> None:
     info = detect_format(sniff(samples / "alb_access_logs.log"))
-    assert info.is_lb_log and not info.is_flow_log and info.has_rules
-    assert info.lb_columns["column_1"] == "type"
-    assert info.lb_columns["column_13"] == "request"
-    assert info.lb_columns["column_30"] == "conn_trace_id"
-    assert len(info.lb_columns) == 30
+    assert info.plugin == "load_balancer" and info.table == "lb" and info.has_rules
+    assert info.dash_means_missing
+    assert info.columns["column_1"] == "type"
+    assert info.columns["column_13"] == "request"
+    assert info.columns["column_30"] == "conn_trace_id"
+    assert len(info.columns) == 30
 
 
 def test_nlb_maps_positional_columns(samples: Path) -> None:
     info = detect_format(sniff(samples / "nlb_access_logs.log"))
-    assert info.lb_columns["column_12"] == "incoming_tls_alert"
-    assert info.lb_columns["column_22"] == "tls_connection_creation_time"
-    assert len(info.lb_columns) == 22
+    assert info.columns["column_12"] == "incoming_tls_alert"
+    assert info.columns["column_22"] == "tls_connection_creation_time"
+    assert len(info.columns) == 22
 
 
 def test_older_alb_log_with_fewer_fields(samples: Path, tmp_path: Path) -> None:
@@ -111,8 +116,8 @@ def test_older_alb_log_with_fewer_fields(samples: Path, tmp_path: Path) -> None:
     older = [join_fields(fields_of(ln)[:25]) for ln in lines]
     info = detect_format(sniff(write(tmp_path, "old.log", "\n".join(older) + "\n")))
     assert info.kind == Format.ALB
-    assert info.lb_columns["column_25"] == "error_reason"
-    assert "conn_trace_id" not in info.lb_columns.values()
+    assert info.columns["column_25"] == "error_reason"
+    assert "conn_trace_id" not in info.columns.values()
 
 
 def test_newer_nlb_log_with_extra_fields(samples: Path, tmp_path: Path) -> None:
@@ -120,7 +125,7 @@ def test_newer_nlb_log_with_extra_fields(samples: Path, tmp_path: Path) -> None:
     newer = [ln + " future-field" for ln in lines]
     info = detect_format(sniff(write(tmp_path, "new.log", "\n".join(newer) + "\n")))
     assert info.kind == Format.NLB
-    assert info.lb_columns["column_23"] == "extra_1"
+    assert info.columns["column_23"] == "extra_1"
 
 
 def test_space_delimited_file_without_lb_shape_is_generic(tmp_path: Path) -> None:
@@ -138,9 +143,9 @@ def test_canonical_names() -> None:
 
 def test_cloudtrail_console_export_maps_header_names(samples: Path) -> None:
     info = detect_format(sniff(samples / "cloudtrail_events.csv"))
-    assert info.is_trail_log and info.has_rules and not info.is_lb_log
+    assert info.plugin == "cloudtrail" and info.table == "trail" and info.has_rules
     assert not info.dash_means_missing
-    cols = info.trail_columns
+    cols = info.columns
     assert cols["Event time"] == "event_time"
     assert cols["Event name"] == "event_name"
     assert cols["Source IP address"] == "source_ip"
@@ -171,9 +176,9 @@ def test_cloudtrail_athena_result_is_recognised(tmp_path: Path) -> None:
     text = ATHENA_HEADER + "\n" + "".join(athena_line(i) for i in range(9))
     info = detect_format(sniff(write(tmp_path, "athena.csv", text)))
     assert info.kind == Format.CLOUDTRAIL
-    assert info.trail_columns["useridentity"] == "user_identity"
-    assert info.trail_columns["sourceipaddress"] == "source_ip"
-    assert info.trail_columns["eventversion"] == "eventversion"  # unknown columns keep their name
+    assert info.columns["useridentity"] == "user_identity"
+    assert info.columns["sourceipaddress"] == "source_ip"
+    assert info.columns["eventversion"] == "eventversion"  # unknown columns keep their name
 
 
 def test_cloudtrail_lake_flattened_columns(tmp_path: Path) -> None:
@@ -187,8 +192,8 @@ def test_cloudtrail_lake_flattened_columns(tmp_path: Path) -> None:
     )
     info = detect_format(sniff(write(tmp_path, "lake.csv", text)))
     assert info.kind == Format.CLOUDTRAIL
-    assert info.trail_columns["userIdentity.type"] == "identity_type"
-    assert info.trail_columns["userIdentity.arn"] == "identity_arn"
+    assert info.columns["userIdentity.type"] == "identity_type"
+    assert info.columns["userIdentity.arn"] == "identity_arn"
 
 
 def test_event_columns_without_aws_sources_stay_generic(tmp_path: Path) -> None:

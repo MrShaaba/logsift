@@ -11,7 +11,7 @@ def count(ds: Dataset, where: str) -> int:
 
 
 def test_alb_table_has_typed_and_derived_columns(alb_ds: Dataset) -> None:
-    assert alb_ds.table == "lb" and alb_ds.is_lb_log and alb_ds.has_rules
+    assert alb_ds.table == "lb" and alb_ds.format.plugin == "load_balancer" and alb_ds.has_rules
     assert alb_ds.rows == 4156
     assert alb_ds.load.warnings == []
     names = [c for c, _ in alb_ds.columns]

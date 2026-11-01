@@ -212,7 +212,7 @@ def healthy_lines(samples: Path, name: str, keep: int) -> list[str]:
 def test_healthy_alb_log_reports_quiet(samples: Path, tmp_path: Path) -> None:
     text = "\n".join(healthy_lines(samples, "alb_access_logs.log", 300)) + "\n"
     ds = Dataset.open(write(tmp_path, "quiet.log", text))
-    assert ds.is_lb_log and ds.rows == 300
+    assert ds.table == "lb" and ds.rows == 300
     rules = {f.rule: f for f in ds.findings}
     assert rules["server_errors"].title == "No server errors"
     assert rules["server_errors"].severity == Severity.INFO

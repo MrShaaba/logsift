@@ -188,7 +188,7 @@ def build_lb_table(
     target: str = "lb",
 ) -> list[str]:
     """Create ``target`` with documented column names and types. Returns its columns."""
-    if not fmt.is_lb_log:
+    if fmt.kind not in (Format.ALB, Format.NLB):
         raise ValueError("not a load balancer log")
     types = ALB_TYPES if fmt.kind == Format.ALB else NLB_TYPES
     order = ALB_ORDER if fmt.kind == Format.ALB else NLB_ORDER
@@ -196,14 +196,14 @@ def build_lb_table(
 
     base = ", ".join(
         f"try_cast({q(raw)} AS {types.get(name, 'VARCHAR')}) AS {q(name)}"
-        for raw, name in fmt.lb_columns.items()
+        for raw, name in fmt.columns.items()
     )
     sql = f"SELECT {base} FROM {q(source)}"
     for level in levels:
         extra = ", ".join(f"{expr} AS {q(name)}" for name, expr in level)
         sql = f"SELECT *, {extra} FROM ({sql})"
 
-    available = list(fmt.lb_columns.values()) + [name for level in levels for name, _ in level]
+    available = list(fmt.columns.values()) + [name for level in levels for name, _ in level]
     ordered = [c for c in order if c in available] + [c for c in available if c not in order]
     cols = ", ".join(q(c) for c in ordered)
     con.execute(f"DROP TABLE IF EXISTS {q(target)}")

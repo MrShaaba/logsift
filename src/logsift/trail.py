@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.formats import FormatInfo
+from logsift.formats import Format, FormatInfo
 from logsift.sql import q
 
 BOOL_COLUMNS = {"read_only", "mfa_used", "mfa_authenticated"}
@@ -239,9 +239,9 @@ def build_trail_table(
     target: str = "trail",
 ) -> list[str]:
     """Create ``target`` with canonical column names and types. Returns its columns."""
-    if not fmt.is_trail_log:
+    if fmt.kind != Format.CLOUDTRAIL:
         raise ValueError("not a CloudTrail export")
-    mapping = fmt.trail_columns
+    mapping = fmt.columns
     available = set(mapping.values())
 
     base_parts: list[str] = []

@@ -173,7 +173,7 @@ def healthy_lines(samples: Path, keep: int) -> str:
 
 def test_healthy_export_reports_quiet(samples: Path, tmp_path: Path) -> None:
     ds = Dataset.open(write(tmp_path, "quiet.csv", healthy_lines(samples, 400)))
-    assert ds.is_trail_log and ds.rows == 400
+    assert ds.table == "trail" and ds.rows == 400
     rules = {f.rule: f for f in ds.findings}
     assert rules["access_denied"].title == "No access denied errors"
     assert rules["console_logins"].title == "Every console sign-in used MFA"

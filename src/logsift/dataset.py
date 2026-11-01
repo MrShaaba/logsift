@@ -11,12 +11,9 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.explore import table_columns
-from logsift.flow import build_flow_table
-from logsift.formats import FormatInfo, detect_format
-from logsift.lb import build_lb_table
+from logsift.formats import FormatInfo, FormatPlugin, detect_format, plugin_for
 from logsift.loader import LoadResult, Sniff, load, sniff
 from logsift.profile import Profile, profile_table
-from logsift.trail import build_trail_table
 
 if TYPE_CHECKING:
     from logsift.insights.base import Finding
@@ -32,8 +29,8 @@ class Dataset:
     sniff: Sniff
     format: FormatInfo
     load: LoadResult
-    # "flow" for VPC Flow Logs, "lb" for ALB and NLB access logs, "trail" for CloudTrail
-    # exports, otherwise "raw".
+    # The canonical table the format's plug-in built ("flow", "lb", "trail", ...), or
+    # "raw" when the format has none or building it failed.
     table: str
     canonical_columns: list[str] = field(default_factory=list)
     build_error: str = ""
@@ -57,38 +54,23 @@ class Dataset:
             load=result,
             table="raw",
         )
-        builders = {
-            "flow": build_flow_table if fmt.is_flow_log else None,
-            "lb": build_lb_table if fmt.is_lb_log else None,
-            "trail": build_trail_table if fmt.is_trail_log else None,
-        }
-        for name, builder in builders.items():
-            if builder is None:
-                continue
+        if fmt.table:
             try:
-                ds.canonical_columns = builder(con, fmt, "raw", name)
-                ds.table = name
+                ds.canonical_columns = ds.plugin.build_table(con, fmt, "raw")
+                ds.table = fmt.table
             except duckdb.Error as exc:  # pragma: no cover - defensive
                 ds.build_error = str(exc).splitlines()[0]
-                ds.load.warnings.append(f"Could not build the {name} table: {ds.build_error}")
-            break
+                ds.load.warnings.append(f"Could not build the {fmt.table} table: {ds.build_error}")
         return ds
 
     @property
-    def is_flow_log(self) -> bool:
-        return self.table == "flow"
-
-    @property
-    def is_lb_log(self) -> bool:
-        return self.table == "lb"
-
-    @property
-    def is_trail_log(self) -> bool:
-        return self.table == "trail"
+    def plugin(self) -> FormatPlugin:
+        return plugin_for(self.format.plugin)
 
     @property
     def has_rules(self) -> bool:
-        return self.is_flow_log or self.is_lb_log or self.is_trail_log
+        """True once the format's canonical table is in place; findings run over it."""
+        return self.table != "raw"
 
     @property
     def rows(self) -> int:
@@ -108,27 +90,11 @@ class Dataset:
 
     @cached_property
     def findings(self) -> list[Finding]:
-        if self.is_flow_log:
-            from logsift.insights.flowlogs import run_rules
-        elif self.is_lb_log:
-            from logsift.insights.lblogs import run_rules
-        elif self.is_trail_log:
-            from logsift.insights.cloudtrail import run_rules
-        else:
-            return []
-        return run_rules(self)
+        return self.plugin.findings(self) if self.has_rules else []
 
     @cached_property
     def timeline(self) -> dict[str, Any] | None:
-        if self.is_flow_log:
-            from logsift.insights.flowlogs import build_timeline
-        elif self.is_lb_log:
-            from logsift.insights.lblogs import build_timeline
-        elif self.is_trail_log:
-            from logsift.insights.cloudtrail import build_timeline
-        else:
-            return None
-        return build_timeline(self)
+        return self.plugin.timeline(self) if self.has_rules else None
 
     def finding(self, finding_id: str) -> Finding | None:
         return next((f for f in self.findings if f.id == finding_id), None)

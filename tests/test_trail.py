@@ -13,7 +13,7 @@ def count(ds: Dataset, where: str) -> int:
 
 
 def test_trail_table_has_typed_and_derived_columns(trail_ds: Dataset) -> None:
-    assert trail_ds.table == "trail" and trail_ds.is_trail_log
+    assert trail_ds.table == "trail" and trail_ds.format.plugin == "cloudtrail"
     assert trail_ds.rows == 2267
     assert trail_ds.load.warnings == []
     names = [c for c, _ in trail_ds.columns]
@@ -106,7 +106,7 @@ def test_athena_struct_text_without_json_column(tmp_path: Path) -> None:
     text = ATHENA_HEADER + "\n" + "".join(athena_line(i) for i in range(9))
     text += athena_line(9, "RunInstances", "Client.UnauthorizedOperation")
     ds = Dataset.open(write(tmp_path, "athena.csv", text))
-    assert ds.is_trail_log and ds.rows == 10
+    assert ds.table == "trail" and ds.rows == 10
     row = (
         ds.cursor()
         .execute(
@@ -141,7 +141,7 @@ def test_console_export_without_the_record_column(tmp_path: Path) -> None:
         "203.0.113.61,,false\n"
     )
     ds = Dataset.open(write(tmp_path, "console.csv", header + lines))
-    assert ds.is_trail_log
+    assert ds.table == "trail"
     rows = (
         ds.cursor()
         .execute(
