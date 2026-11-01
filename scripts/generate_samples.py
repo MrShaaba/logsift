@@ -32,11 +32,21 @@ Planted problems in the CloudTrail export (see ``TRAIL_PLANTED``):
 * console sign-ins without MFA, one of them by the root account
 * root creating an administrator user and an access key for it
 * that new user launching GPU instances in two regions the account never uses
+
+Planted problems in the S3 server access log (see ``S3_PLANTED``):
+
+* a bucket policy that lets anyone list the bucket and read ``backups/``, and a stranger
+  who does exactly that, pulling gigabytes of database dumps without signing a request
+* another stranger guessing sixty file names worth stealing, refused every time
+* a cleanup script deleting three hundred thumbnails, and the shop's 404s from then on
+* a batch role missing permission on one prefix and retrying every five minutes
+* a short burst of 503 SlowDown during an upload spike
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import gzip
 import hashlib
@@ -2191,6 +2201,617 @@ def write_cloudtrail(out: Path, rng: random.Random) -> None:
             writer.writerow(event.row(rng))
 
 
+# ------------------------------------------------------------ S3 server access logs
+
+S3_PLANTED = {
+    "public_backups": {"ip": "203.0.113.61", "prefix": "backups/", "window": ("09:15", "09:27")},
+    "anonymous_probing": {"ip": "198.51.100.77", "window": ("09:50", "09:58")},
+    "deleted_thumbnails": {"user": "bob", "prefix": "images/thumbs/", "window": ("09:05", "09:08")},
+    "missing_thumbnails": {"prefix": "images/thumbs/", "from": "09:08"},
+    "denied_exports": {"role": "shop-reports-role", "prefix": "exports/finance/"},
+    "throttled_uploads": {"role": "shop-web-role", "window": ("08:40", "08:42")},
+}
+
+BUCKET = "shop-assets-example"
+BUCKET_OWNER = hashlib.sha256(f"{BUCKET} owner".encode()).hexdigest()  # a canonical user id
+S3_HOST = f"{BUCKET}.s3.{REGION}.amazonaws.com"
+SHOP_URL = "https://shop.example.com"
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+REPORTS_ROLE = Identity("AssumedRole", "shop-reports-role", "reports-batch", "ASIAEXAMPLEREPORTS01")
+BACKUP_ROLE = Identity("AssumedRole", "shop-backup-role", "backup-20260310", "ASIAEXAMPLEBACKUP001")
+LIFECYCLE = "svc:s3.amazonaws.com"
+CONSOLE_AGENT = "S3Console/0.4"
+CURL_AGENT = "curl/8.4.0"
+JAVA_SDK_AGENT = "aws-sdk-java/2.25.16 Linux/6.5.0-1016-aws OpenJDK_64-Bit_Server_VM/17.0.10"
+
+DELETED_THUMBS = range(100, 400)  # product ids whose thumbnails bob removes at 09:05
+PROBE_KEYS = [
+    ".env",
+    ".env.bak",
+    ".git/config",
+    ".git/HEAD",
+    ".aws/credentials",
+    ".htpasswd",
+    ".DS_Store",
+    "config.json",
+    "config.yml",
+    "config/database.yml",
+    "settings.py",
+    "appsettings.json",
+    "web.config",
+    "wp-config.php",
+    "backup.zip",
+    "backup.sql",
+    "backup.tar.gz",
+    "db.sql",
+    "dump.sql",
+    "database.sql",
+    "site.zip",
+    "www.zip",
+    "credentials.json",
+    "secrets.yaml",
+    "secrets.json",
+    "id_rsa",
+    "id_rsa.pub",
+    "server.key",
+    "server.pem",
+    "users.csv",
+    "users.json",
+    "customers.csv",
+    "customers.xlsx",
+    "orders.csv",
+    "payments.csv",
+    "invoices/2026/01.pdf",
+    "admin/",
+    "admin/config.php",
+    "private/",
+    "internal/",
+    "uploads/",
+    "logs/access.log",
+    "logs/error.log",
+    "debug.log",
+    "error.log",
+    "phpinfo.php",
+    "info.php",
+    "test.php",
+    "robots.txt",
+    "sitemap.xml",
+    "index.html",
+    "index.php",
+    "api/keys.json",
+    "api/config.json",
+    "keys/",
+    "export/",
+    "exports/all.csv",
+    "data/",
+    "db/",
+    "sql/",
+]
+
+
+def s3_time(t: datetime) -> str:
+    return f"[{t.day:02d}/{MONTHS[t.month - 1]}/{t.year}:{t:%H:%M:%S} +0000]"
+
+
+def presign(key_id: str, t: datetime, rng: random.Random) -> str:
+    """The query string of a presigned URL (documentation example key ids only)."""
+    return (
+        "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Credential={key_id}%2F{t:%Y%m%d}%2F{REGION}%2Fs3%2Faws4_request"
+        f"&X-Amz-Date={t:%Y%m%dT%H%M%S}Z&X-Amz-Expires=300&X-Amz-SignedHeaders=host"
+        f"&X-Amz-Signature={rng.getrandbits(256):064x}"
+    )
+
+
+@dataclass
+class S3Req:
+    """One line of an S3 server access log."""
+
+    time: datetime
+    ip: str  # "" when S3 itself made the request (lifecycle)
+    requester: str  # ARN, canonical id, svc:..., or "" for anonymous
+    operation: str  # REST.GET.OBJECT, REST.PUT.OBJECT, REST.GET.BUCKET, ...
+    key: str  # "" for a bucket-level request
+    method: str
+    status: int
+    error: str = ""
+    bytes_sent: int | None = None
+    object_size: int | None = None
+    total_ms: int = 20
+    turnaround_ms: int | None = 10
+    referer: str = ""
+    agent: str = "-"
+    auth: str = "AuthHeader"  # AuthHeader, QueryString, or "" for anonymous
+    tls: tuple[str, str] = TLS12
+    query: str = ""
+
+    def line(self, rng: random.Random) -> str:
+        request_id = "".join(rng.choice("0123456789ABCDEF") for _ in range(16))
+        host_id = base64.b64encode(rng.randbytes(56)).decode()
+        uri = f"{self.method} /{self.key}{self.query} HTTP/1.1" if self.ip else "-"
+        anonymous = not self.requester
+        fields = [
+            BUCKET_OWNER,
+            BUCKET,
+            s3_time(self.time),
+            self.ip or "-",
+            self.requester or "-",
+            request_id,
+            self.operation,
+            self.key or "-",
+            quote(uri),
+            str(self.status),
+            self.error or "-",
+            "-" if self.bytes_sent is None else str(self.bytes_sent),
+            "-" if self.object_size is None else str(self.object_size),
+            str(self.total_ms),
+            "-" if self.turnaround_ms is None else str(self.turnaround_ms),
+            quote(self.referer or "-"),
+            quote(self.agent),
+            "-",  # version id: the bucket is not versioned
+            host_id,
+            "-" if anonymous or not self.ip else "SigV4",
+            self.tls[0] if self.ip else "-",
+            self.auth or "-",
+            S3_HOST if self.ip else "-",
+            self.tls[1] if self.ip else "-",
+            "-",  # access point ARN
+            "-",  # ACL required
+        ]
+        return " ".join(fields)
+
+
+def error_bytes(status: int) -> int:
+    return {403: 243, 404: 293, 503: 304}.get(status, 310)
+
+
+def thumb_requests(rng: random.Random) -> list[S3Req]:
+    """Shoppers fetching product images through presigned URLs the web tier hands out.
+
+    Thumbnails for products 100-399 stop existing at 09:08 (bob's delete below), so from
+    then on those requests come back 404 NoSuchKey: the planted 4xx-by-prefix problem.
+    """
+    out: list[S3Req] = []
+    gone_from = at(S3_PLANTED["missing_thumbnails"]["from"])
+    for _ in range(3400):
+        t = moment(rng)
+        signer = rng.choice(WEB_ROLE)
+        product = rng.randrange(100, 1000) if rng.random() < 0.45 else rng.randrange(100, 400)
+        thumb = rng.random() < 0.5
+        key = f"images/{'thumbs' if thumb else 'products'}/{product}.jpg"
+        size = rng.randrange(4_000, 30_000) if thumb else rng.randrange(40_000, 400_000)
+        req = S3Req(
+            t,
+            rng.choice(PUBLIC_CLIENTS),
+            signer.arn,
+            "REST.GET.OBJECT",
+            key,
+            "GET",
+            200,
+            bytes_sent=size,
+            object_size=size,
+            total_ms=rng.randrange(12, 180),
+            turnaround_ms=rng.randrange(8, 40),
+            referer=f"{SHOP_URL}/products/{product}",
+            agent=rng.choice(BROWSERS),
+            auth="QueryString",
+            tls=TLS13 if rng.random() < 0.7 else TLS12,
+            query=presign(signer.key, t - timedelta(seconds=rng.randrange(1, 240)), rng),
+        )
+        if thumb and product in DELETED_THUMBS and t >= gone_from:
+            req.status, req.error = 404, "NoSuchKey"
+            req.bytes_sent, req.object_size = error_bytes(404), None
+            req.turnaround_ms = None
+        out.append(req)
+    return out
+
+
+def web_tier_requests(rng: random.Random) -> list[S3Req]:
+    """The web instances: uploads, metadata checks and a feature-flag file polled each
+    minute. A short 503 SlowDown burst is planted during an upload spike at 08:40."""
+    out: list[S3Req] = []
+    slow_lo, slow_hi = (at(x) for x in S3_PLANTED["throttled_uploads"]["window"])
+    for host, who in zip(WEB, WEB_ROLE, strict=True):
+        for t in every(rng, T0, T0 + DURATION, 60, jitter=0.05):
+            out.append(
+                S3Req(
+                    t,
+                    host.ip,
+                    who.arn,
+                    "REST.GET.OBJECT",
+                    "config/feature-flags.json",
+                    "GET",
+                    200,
+                    bytes_sent=1_842,
+                    object_size=1_842,
+                    total_ms=rng.randrange(8, 30),
+                    turnaround_ms=rng.randrange(5, 15),
+                    agent=BOTO_AGENT,
+                    tls=TLS13,
+                )
+            )
+        for t in every(rng, T0, T0 + DURATION, 120):
+            product = rng.randrange(100, 1000)
+            size = rng.randrange(40_000, 400_000)
+            out.append(
+                S3Req(
+                    t,
+                    host.ip,
+                    who.arn,
+                    "REST.PUT.OBJECT",
+                    f"images/products/{product}.jpg",
+                    "PUT",
+                    200,
+                    bytes_sent=None,
+                    object_size=size,
+                    total_ms=rng.randrange(30, 250),
+                    turnaround_ms=rng.randrange(10, 60),
+                    agent=BOTO_AGENT,
+                    tls=TLS13,
+                )
+            )
+        for t in every(rng, T0, T0 + DURATION, 75):
+            product = rng.randrange(100, 1000)
+            out.append(
+                S3Req(
+                    t,
+                    host.ip,
+                    who.arn,
+                    "REST.HEAD.OBJECT",
+                    f"images/products/{product}.jpg",
+                    "HEAD",
+                    200,
+                    bytes_sent=None,
+                    object_size=rng.randrange(40_000, 400_000),
+                    total_ms=rng.randrange(6, 25),
+                    turnaround_ms=rng.randrange(4, 12),
+                    agent=BOTO_AGENT,
+                    tls=TLS13,
+                )
+            )
+    # A bulk import pushes 60 uploads through in two minutes; S3 throttles 14 of them.
+    for i, t in enumerate(every(rng, slow_lo, slow_hi, 2, jitter=0.2)):
+        host, who = WEB[i % 3], WEB_ROLE[i % 3]
+        throttled = i % 4 == 1
+        out.append(
+            S3Req(
+                t,
+                host.ip,
+                who.arn,
+                "REST.PUT.OBJECT",
+                f"images/products/{rng.randrange(1000, 1400)}.jpg",
+                "PUT",
+                503 if throttled else 200,
+                error="SlowDown" if throttled else "",
+                bytes_sent=error_bytes(503) if throttled else None,
+                object_size=None if throttled else rng.randrange(40_000, 400_000),
+                total_ms=rng.randrange(20, 90),
+                turnaround_ms=None if throttled else rng.randrange(10, 60),
+                agent=BOTO_AGENT,
+                tls=TLS13,
+            )
+        )
+    return out
+
+
+def batch_requests(rng: random.Random) -> list[S3Req]:
+    """Reports, backups, monitoring and lifecycle. The reports role lacks permission on
+    exports/finance/ and retries three times every five minutes: the planted 403s."""
+    out: list[S3Req] = []
+    app_ip = APP[0].ip
+    for t in every(rng, T0, T0 + DURATION, 600, jitter=0.02):
+        out.append(
+            S3Req(
+                t,
+                app_ip,
+                REPORTS_ROLE.arn,
+                "REST.PUT.OBJECT",
+                f"exports/reports/sales-{t:%Y%m%d-%H%M}.csv",
+                "PUT",
+                200,
+                object_size=rng.randrange(20_000, 90_000),
+                total_ms=rng.randrange(30, 120),
+                turnaround_ms=rng.randrange(10, 40),
+                agent=JAVA_SDK_AGENT,
+            )
+        )
+    denied_key = f"{S3_PLANTED['denied_exports']['prefix']}daily-2026-03-09.csv"
+    for t in every(rng, T0, T0 + DURATION, 300, jitter=0.02):
+        for attempt in range(3):
+            out.append(
+                S3Req(
+                    t + timedelta(seconds=attempt * 2),
+                    app_ip,
+                    REPORTS_ROLE.arn,
+                    "REST.GET.OBJECT",
+                    denied_key,
+                    "GET",
+                    403,
+                    error="AccessDenied",
+                    bytes_sent=error_bytes(403),
+                    total_ms=rng.randrange(6, 20),
+                    turnaround_ms=None,
+                    agent=JAVA_SDK_AGENT,
+                )
+            )
+    # Nightly-style backups landing at 08:05, big objects uploaded in one go.
+    backup_time = at("08:05")
+    for i, (key, size) in enumerate(
+        [
+            ("backups/db/2026-03-10-0800.sql.gz", 648_204_311),
+            ("backups/config/2026-03-10.tar.gz", 2_118_440),
+            ("backups/README.txt", 412),
+        ]
+    ):
+        out.append(
+            S3Req(
+                backup_time + timedelta(seconds=i * 90),
+                DB.ip,
+                BACKUP_ROLE.arn,
+                "REST.PUT.OBJECT",
+                key,
+                "PUT",
+                200,
+                object_size=size,
+                total_ms=max(40, size // 12_000),
+                turnaround_ms=rng.randrange(20, 80),
+                agent=CLI_AGENT,
+            )
+        )
+    for t in every(rng, T0, T0 + DURATION, 300, jitter=0.02):
+        out.append(
+            S3Req(
+                t,
+                MONITOR_IP,
+                MONITOR.arn,
+                "REST.HEAD.BUCKET",
+                "",
+                "HEAD",
+                200,
+                total_ms=rng.randrange(5, 15),
+                turnaround_ms=rng.randrange(3, 10),
+                agent=BOTO_AGENT,
+                tls=TLS13,
+            )
+        )
+    for t in every(rng, T0, T0 + DURATION, 600):
+        out.append(
+            S3Req(
+                t,
+                "",
+                LIFECYCLE,
+                "S3.EXPIRE.OBJECT",
+                f"tmp/upload-{rng.getrandbits(40):010x}.part",
+                "-",
+                200,
+                object_size=rng.randrange(1_000, 5_000_000),
+                total_ms=rng.randrange(10, 60),
+                turnaround_ms=None,
+                auth="",
+            )
+        )
+    return out
+
+
+def people_requests(rng: random.Random) -> list[S3Req]:
+    """Alice and carol poking around with the CLI and the console; bob's cleanup script
+    deleting every thumbnail for products 100-399 at 09:05 is the planted delete burst."""
+    out: list[S3Req] = []
+    alice_ip, bob_ip, carol_ip = (OFFICE_IPS[n] for n in ("alice", "bob", "carol"))
+    for t in every(rng, at("08:10"), at("09:50"), 420, jitter=0.5):
+        prefix = rng.choice(["exports/reports/", "images/products/", "static/", "backups/"])
+        out.append(
+            S3Req(
+                t,
+                alice_ip,
+                ALICE.arn,
+                "REST.GET.BUCKET",
+                "",
+                "GET",
+                200,
+                bytes_sent=rng.randrange(2_000, 40_000),
+                total_ms=rng.randrange(20, 80),
+                turnaround_ms=rng.randrange(10, 40),
+                agent=CLI_AGENT,
+                query=f"?list-type=2&prefix={prefix.replace('/', '%2F')}&encoding-type=url",
+            )
+        )
+        if rng.random() < 0.6:
+            size = rng.randrange(20_000, 90_000)
+            out.append(
+                S3Req(
+                    t + timedelta(seconds=rng.randrange(3, 30)),
+                    alice_ip,
+                    ALICE.arn,
+                    "REST.GET.OBJECT",
+                    f"exports/reports/sales-20260309-{rng.randrange(8, 20):02d}00.csv",
+                    "GET",
+                    200,
+                    bytes_sent=size,
+                    object_size=size,
+                    total_ms=rng.randrange(30, 120),
+                    turnaround_ms=rng.randrange(10, 40),
+                    agent=CLI_AGENT,
+                )
+            )
+    for t in every(rng, at("08:30"), at("09:00"), 240, jitter=0.4):
+        key = f"static/css/shop.{rng.getrandbits(32):08x}.css"
+        size = rng.randrange(30_000, 120_000)
+        out.append(
+            S3Req(
+                t,
+                alice_ip,
+                ALICE.arn,
+                "REST.PUT.OBJECT",
+                key,
+                "PUT",
+                200,
+                object_size=size,
+                total_ms=rng.randrange(40, 160),
+                turnaround_ms=rng.randrange(10, 50),
+                agent=CLI_AGENT,
+            )
+        )
+    console_ops = [
+        ("REST.GET.BUCKET", "", "GET", "?list-type=2&prefix=exports%2F&delimiter=%2F"),
+        ("REST.GET.BUCKET", "", "GET", "?list-type=2&prefix=images%2F&delimiter=%2F"),
+        ("REST.GET.VERSIONING", "", "GET", "?versioning"),
+        ("REST.GET.LOCATION", "", "GET", "?location"),
+        ("REST.GET.BUCKETPOLICY", "", "GET", "?policy"),
+        ("REST.GET.PUBLIC_ACCESS_BLOCK", "", "GET", "?publicAccessBlock"),
+        ("REST.GET.ENCRYPTION", "", "GET", "?encryption"),
+        ("REST.GET.OBJECT", "exports/reports/sales-20260310-0900.csv", "GET", ""),
+    ]
+    for t in every(rng, at("09:20"), at("09:45"), 150, jitter=0.5):
+        op, key, method, query = rng.choice(console_ops)
+        size = rng.randrange(200, 40_000)
+        out.append(
+            S3Req(
+                t,
+                carol_ip,
+                CAROL.arn,
+                op,
+                key,
+                method,
+                200,
+                bytes_sent=size,
+                object_size=size if key else None,
+                total_ms=rng.randrange(15, 90),
+                turnaround_ms=rng.randrange(8, 40),
+                agent=CONSOLE_AGENT,
+                tls=TLS13,
+                query=query,
+            )
+        )
+    # bob: a couple of listings, then "aws s3 rm --recursive" over the thumbnails.
+    lo, hi = (at(x) for x in S3_PLANTED["deleted_thumbnails"]["window"])
+    for i in range(3):
+        out.append(
+            S3Req(
+                lo - timedelta(seconds=20 - i * 6),
+                bob_ip,
+                BOB.arn,
+                "REST.GET.BUCKET",
+                "",
+                "GET",
+                200,
+                bytes_sent=rng.randrange(60_000, 90_000),
+                total_ms=rng.randrange(60, 200),
+                turnaround_ms=rng.randrange(30, 90),
+                agent=CLI_AGENT,
+                query="?list-type=2&prefix=images%2Fthumbs%2F&encoding-type=url"
+                + ("&continuation-token=1%2Fexample" if i else ""),
+            )
+        )
+    step = (hi - lo) / len(DELETED_THUMBS)
+    for i, product in enumerate(DELETED_THUMBS):
+        out.append(
+            S3Req(
+                lo + step * i,
+                bob_ip,
+                BOB.arn,
+                "REST.DELETE.OBJECT",
+                f"images/thumbs/{product}.jpg",
+                "DELETE",
+                204,
+                total_ms=rng.randrange(8, 30),
+                turnaround_ms=rng.randrange(5, 15),
+                agent=CLI_AGENT,
+            )
+        )
+    return out
+
+
+def anonymous_requests(rng: random.Random) -> list[S3Req]:
+    """Two strangers. One lists the bucket and downloads every backup without signing a
+    thing, because a bucket policy grants read to everyone. The other guesses sixty
+    file names that would be worth stealing and gets 403 for each."""
+    out: list[S3Req] = []
+    planted = S3_PLANTED["public_backups"]
+    t = at(planted["window"][0])
+    for query in ("?list-type=2", "?list-type=2&prefix=backups%2F"):
+        out.append(
+            S3Req(
+                t,
+                planted["ip"],
+                "",
+                "REST.GET.BUCKET",
+                "",
+                "GET",
+                200,
+                bytes_sent=rng.randrange(8_000, 60_000),
+                total_ms=rng.randrange(40, 150),
+                turnaround_ms=rng.randrange(20, 80),
+                agent=CURL_AGENT,
+                auth="",
+                query=query,
+            )
+        )
+        t += timedelta(seconds=rng.randrange(20, 40))
+    backups = [(f"backups/db/2026-03-{day:02d}-0800.sql.gz", 640_000_000) for day in range(4, 11)]
+    backups += [(f"backups/config/2026-03-{day:02d}.tar.gz", 2_100_000) for day in range(6, 11)]
+    backups.append(("backups/README.txt", 412))
+    for key, about in backups:
+        size = about + rng.randrange(-about // 20, about // 20 + 1)
+        out.append(
+            S3Req(
+                t,
+                planted["ip"],
+                "",
+                "REST.GET.OBJECT",
+                key,
+                "GET",
+                200,
+                bytes_sent=size,
+                object_size=size,
+                total_ms=max(30, size // 9_000),
+                turnaround_ms=rng.randrange(20, 80),
+                agent=CURL_AGENT,
+                auth="",
+            )
+        )
+        t += timedelta(milliseconds=max(30, size // 9_000) + rng.randrange(500, 3000))
+    probing = S3_PLANTED["anonymous_probing"]
+    lo, hi = (at(x) for x in probing["window"])
+    for i, key in enumerate(PROBE_KEYS):
+        out.append(
+            S3Req(
+                lo + (hi - lo) * i / len(PROBE_KEYS) + timedelta(seconds=rng.random() * 4),
+                probing["ip"],
+                "",
+                "REST.GET.OBJECT",
+                key,
+                "GET",
+                403,
+                error="AccessDenied",
+                bytes_sent=error_bytes(403),
+                total_ms=rng.randrange(5, 20),
+                turnaround_ms=None,
+                agent=SCANNER_AGENT,
+                auth="",
+            )
+        )
+    return out
+
+
+def s3_requests(rng: random.Random) -> list[S3Req]:
+    reqs = thumb_requests(rng)
+    reqs += web_tier_requests(rng)
+    reqs += batch_requests(rng)
+    reqs += people_requests(rng)
+    reqs += anonymous_requests(rng)
+    reqs = [r for r in reqs if T0 <= r.time < T0 + DURATION]
+    reqs.sort(key=lambda r: (r.time, r.operation, r.key))
+    return reqs
+
+
+def write_s3(out: Path, rng: random.Random) -> None:
+    with (out / "s3_access_logs.log").open("w") as fh:
+        for req in s3_requests(rng):
+            fh.write(req.line(rng) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", default="samples", help="output directory")
@@ -2205,6 +2826,7 @@ def main() -> None:
     write_alb(out, random.Random(SEED + 2))
     write_nlb(out, random.Random(SEED + 3))
     write_cloudtrail(out, random.Random(SEED + 4))
+    write_s3(out, random.Random(SEED + 5))
     for p in sorted(out.iterdir()):
         print(f"{p.name:40s} {p.stat().st_size / 1024:8.0f} KB")
 

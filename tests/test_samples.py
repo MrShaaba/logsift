@@ -60,3 +60,20 @@ def test_cloudtrail_sample_is_fictional() -> None:
     assert accounts == {"123456789012"}
     keys = set(re.findall(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", text))
     assert keys and all("EXAMPLE" in k for k in keys)
+
+
+def test_s3_sample_is_fictional() -> None:
+    import re
+
+    text = (ROOT / "samples" / "s3_access_logs.log").read_text()
+    ips = set(re.findall(IP_RE, text))
+    assert ips and all(ip.startswith(ALLOWED_PREFIXES) for ip in ips)
+    hosts = set(re.findall(r"[a-z0-9.-]+\.(?:com|net|org|io)\b", text))
+    assert hosts and all(h.endswith(("amazonaws.com", "example.com")) for h in hosts)
+    # Random host ids and signatures can contain twelve digits in a row, so look at the
+    # account field of every ARN instead of every twelve-digit run.
+    accounts = set(re.findall(r"arn:aws:[a-z0-9-]+::(\d{12}):", text))
+    assert accounts == {"123456789012"}
+    keys = set(re.findall(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", text))
+    assert keys and all("EXAMPLE" in k for k in keys)
+    assert "shop-assets-example" in text
