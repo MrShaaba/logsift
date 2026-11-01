@@ -1,10 +1,13 @@
-"""Shared finding types."""
+"""Shared finding types and the small helpers every rule module uses."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
+
+from logsift.sql import lit
 
 
 class Severity(StrEnum):
@@ -59,3 +62,55 @@ class Finding:
 
 def sort_findings(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (SEVERITY_ORDER[f.severity], -f.row_count, f.title))
+
+
+# ------------------------------------------------------------------ text helpers
+
+
+def fmt_bytes(n: int | float | None) -> str:
+    if n is None:
+        return "0 B"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:,.0f} {unit}" if unit == "B" else f"{n:,.1f} {unit}"
+        n /= 1024
+    return f"{n:,.1f} TB"
+
+
+def utc(epoch: int) -> datetime:
+    return datetime.fromtimestamp(epoch, UTC).replace(tzinfo=None)
+
+
+def fmt_ts(ts: datetime | None) -> str:
+    return ts.strftime("%Y-%m-%d %H:%M") if ts else "?"
+
+
+def plural(n: int, word: str) -> str:
+    if n == 1:
+        return f"{n:,} {word}"
+    return f"{n:,} {word}{'es' if word.endswith('s') else 's'}"
+
+
+def span(first: datetime | None, last: datetime | None) -> str:
+    return f"between {fmt_ts(first)} and {fmt_ts(last)}" if first else "in this file"
+
+
+def ts(value: datetime) -> str:
+    """A TIMESTAMP literal."""
+    return f"TIMESTAMP {lit(value.strftime('%Y-%m-%d %H:%M:%S.%f'))}"
+
+
+def pick_bucket(span_seconds: float) -> tuple[str, int]:
+    """Timeline bucket size that keeps the chart to about 150 bars."""
+    for name, secs in (
+        ("minute", 60),
+        ("5 minutes", 300),
+        ("15 minutes", 900),
+        ("hour", 3600),
+        ("6 hours", 21600),
+        ("day", 86400),
+    ):
+        if span_seconds / secs <= 150:
+            return name, secs
+    return "day", 86400

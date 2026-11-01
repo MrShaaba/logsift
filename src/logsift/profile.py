@@ -8,7 +8,7 @@ from typing import Any
 
 import duckdb
 
-from logsift.flow import q
+from logsift.sql import q
 
 HIST_BINS = 16
 TOP_N = 6

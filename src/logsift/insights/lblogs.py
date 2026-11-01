@@ -15,8 +15,20 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats import Format
-from logsift.insights.base import Finding, Severity, Table, sort_findings
-from logsift.insights.flowlogs import fmt_bytes, fmt_ts, lit, pick_bucket, utc
+from logsift.insights.base import (
+    Finding,
+    Severity,
+    Table,
+    fmt_bytes,
+    fmt_ts,
+    pick_bucket,
+    plural,
+    sort_findings,
+    span,
+    ts,
+    utc,
+)
+from logsift.sql import lit
 
 if TYPE_CHECKING:
     from logsift.dataset import Dataset
@@ -80,20 +92,6 @@ def make_context(ds: Dataset) -> Context:
         row = con.execute("SELECT count(*), NULL, NULL FROM lb").fetchone()
     total, start, end = row or (0, None, None)
     return Context(con, ds.format.kind, columns, int(total), start, end)
-
-
-def plural(n: int, word: str) -> str:
-    if n == 1:
-        return f"{n:,} {word}"
-    return f"{n:,} {word}{'es' if word.endswith('s') else 's'}"
-
-
-def span(first: datetime | None, last: datetime | None) -> str:
-    return f"between {fmt_ts(first)} and {fmt_ts(last)}" if first else "in this file"
-
-
-def ts(value: datetime) -> str:
-    return f"TIMESTAMP {lit(value.strftime('%Y-%m-%d %H:%M:%S.%f'))}"
 
 
 # ------------------------------------------------------------------------ ALB rules

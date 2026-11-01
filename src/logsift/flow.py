@@ -5,6 +5,7 @@ from __future__ import annotations
 import duckdb
 
 from logsift.formats import FLOW_FIELDS, FormatInfo
+from logsift.sql import q
 
 FLOW_TYPES: dict[str, str] = {
     "version": "INTEGER",
@@ -23,10 +24,6 @@ PROTOCOLS = {1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 50: "ESP", 58: "ICMPv6",
 
 # tcp-flags in flow logs is the OR of every flag seen in the aggregation window.
 FIN, SYN, RST, PSH, ACK, URG = 1, 2, 4, 8, 16, 32
-
-
-def q(ident: str) -> str:
-    return '"' + ident.replace('"', '""') + '"'
 
 
 def protocol_name(number: int | None) -> str:

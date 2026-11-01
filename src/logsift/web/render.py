@@ -9,7 +9,7 @@ from typing import Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
-from logsift.insights.flowlogs import fmt_bytes
+from logsift.insights.base import fmt_bytes
 from logsift.profile import fmt_value
 
 PLAIN_INT_HINTS = (

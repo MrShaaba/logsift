@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.flow import q
 from logsift.formats import FormatInfo
+from logsift.sql import q
 
 BOOL_COLUMNS = {"read_only", "mfa_used", "mfa_authenticated"}
 TIMESTAMP_COLUMNS = {"event_time"}

@@ -7,7 +7,7 @@ from typing import Any
 
 import duckdb
 
-from logsift.flow import q
+from logsift.sql import q
 
 PER_PAGE = 50
 MAX_EXPORT_ROWS = 200_000

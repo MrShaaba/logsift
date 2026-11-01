@@ -14,9 +14,19 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from logsift.insights.base import Finding, Severity, Table, sort_findings
-from logsift.insights.flowlogs import fmt_ts, lit, pick_bucket, utc
-from logsift.insights.lblogs import plural, span, ts
+from logsift.insights.base import (
+    Finding,
+    Severity,
+    Table,
+    fmt_ts,
+    pick_bucket,
+    plural,
+    sort_findings,
+    span,
+    ts,
+    utc,
+)
+from logsift.sql import lit
 
 if TYPE_CHECKING:
     from logsift.dataset import Dataset
