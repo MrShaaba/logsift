@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from logsift.dataset import Dataset
-from logsift.lb import alert_name
+from logsift.formats.loadbalancer.table import alert_name
 
 
 def count(ds: Dataset, where: str) -> int:

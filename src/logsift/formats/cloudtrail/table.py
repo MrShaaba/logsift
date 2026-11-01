@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.formats import Format, FormatInfo
+from logsift.formats.base import Format, FormatInfo
 from logsift.sql import q
 
 BOOL_COLUMNS = {"read_only", "mfa_used", "mfa_authenticated"}

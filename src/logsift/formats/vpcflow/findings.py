@@ -1,6 +1,6 @@
 """Rule-based findings for VPC Flow Logs.
 
-Every rule is plain SQL over the canonical ``flow`` table built by ``logsift.flow``.
+Every rule is plain SQL over the canonical ``flow`` table built by ``table.py`` next door.
 Thresholds are deliberately simple and written down next to each rule.
 """
 
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from logsift.flow import ACK, SYN, protocol_name
+from logsift.formats.vpcflow.table import ACK, SYN, protocol_name
 from logsift.insights.base import (
     Finding,
     Severity,

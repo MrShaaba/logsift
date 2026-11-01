@@ -4,9 +4,75 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.formats import FormatInfo
-from logsift.formats.vpcflow import FLOW_FIELDS
+from logsift.formats.base import FormatInfo, squash
 from logsift.sql import q
+
+# Canonical flow-log field names (underscored) keyed by their squashed spelling.
+FLOW_FIELDS: dict[str, str] = {
+    "version": "version",
+    "accountid": "account_id",
+    "interfaceid": "interface_id",
+    "srcaddr": "srcaddr",
+    "dstaddr": "dstaddr",
+    "srcport": "srcport",
+    "dstport": "dstport",
+    "protocol": "protocol",
+    "packets": "packets",
+    "bytes": "bytes",
+    "start": "start",
+    "end": "end",
+    "action": "action",
+    "logstatus": "log_status",
+    "vpcid": "vpc_id",
+    "subnetid": "subnet_id",
+    "instanceid": "instance_id",
+    "tcpflags": "tcp_flags",
+    "type": "type",
+    "pktsrcaddr": "pkt_srcaddr",
+    "pktdstaddr": "pkt_dstaddr",
+    "region": "region",
+    "azid": "az_id",
+    "sublocationtype": "sublocation_type",
+    "sublocationid": "sublocation_id",
+    "pktsrcawsservice": "pkt_src_aws_service",
+    "pktdstawsservice": "pkt_dst_aws_service",
+    "flowdirection": "flow_direction",
+    "trafficpath": "traffic_path",
+    "ecsclustername": "ecs_cluster_name",
+    "ecsclusterarn": "ecs_cluster_arn",
+    "ecscontainerinstanceid": "ecs_container_instance_id",
+    "ecscontainerinstancearn": "ecs_container_instance_arn",
+    "ecsservicename": "ecs_service_name",
+    "ecstaskdefinitionarn": "ecs_task_definition_arn",
+    "ecstaskid": "ecs_task_id",
+    "ecstaskarn": "ecs_task_arn",
+    "ecscontainerid": "ecs_container_id",
+    "ecssecondcontainerid": "ecs_second_container_id",
+    "rejectreason": "reject_reason",
+}
+
+V2_FIELDS = [
+    "version",
+    "account_id",
+    "interface_id",
+    "srcaddr",
+    "dstaddr",
+    "srcport",
+    "dstport",
+    "protocol",
+    "packets",
+    "bytes",
+    "start",
+    "end",
+    "action",
+    "log_status",
+]
+
+
+def canonical(name: str) -> str | None:
+    """The canonical flow-log field a header name refers to, or None."""
+    return FLOW_FIELDS.get(squash(name))
+
 
 FLOW_TYPES: dict[str, str] = {
     "version": "INTEGER",

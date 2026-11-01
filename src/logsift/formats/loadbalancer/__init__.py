@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, positional
+from logsift.formats.loadbalancer.findings import build_timeline, run_rules
+from logsift.formats.loadbalancer.table import build_lb_table
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
@@ -132,16 +134,10 @@ class LoadBalancerPlugin(FormatPlugin):
     def build_table(
         self, con: duckdb.DuckDBPyConnection, fmt: FormatInfo, source: str = "raw"
     ) -> list[str]:
-        from logsift.lb import build_lb_table
-
         return build_lb_table(con, fmt, source, self.table)
 
     def findings(self, ds: Dataset) -> list[Finding]:
-        from logsift.insights.lblogs import run_rules
-
         return run_rules(ds)
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
-        from logsift.insights.lblogs import build_timeline
-
         return build_timeline(ds)

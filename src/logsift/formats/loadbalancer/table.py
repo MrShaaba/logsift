@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import duckdb
 
-from logsift.formats import Format, FormatInfo
+from logsift.formats.base import Format, FormatInfo
 from logsift.sql import q
 
 ALB_TYPES: dict[str, str] = {

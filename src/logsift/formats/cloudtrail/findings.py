@@ -1,6 +1,6 @@
 """Rule-based findings for CloudTrail event exports.
 
-Every rule is plain SQL over the ``trail`` table built by ``logsift.trail``. One row is
+Every rule is plain SQL over the ``trail`` table built by ``table.py`` next door. One row is
 one API call or console sign-in, so the rules talk about principals, actions, regions and
 error codes. Thresholds are simple and written next to each rule.
 """

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
+from logsift.formats.cloudtrail.findings import build_timeline, run_rules
+from logsift.formats.cloudtrail.table import build_trail_table
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
@@ -108,16 +110,10 @@ class CloudTrailPlugin(FormatPlugin):
     def build_table(
         self, con: duckdb.DuckDBPyConnection, fmt: FormatInfo, source: str = "raw"
     ) -> list[str]:
-        from logsift.trail import build_trail_table
-
         return build_trail_table(con, fmt, source, self.table)
 
     def findings(self, ds: Dataset) -> list[Finding]:
-        from logsift.insights.cloudtrail import run_rules
-
         return run_rules(ds)
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
-        from logsift.insights.cloudtrail import build_timeline
-
         return build_timeline(ds)

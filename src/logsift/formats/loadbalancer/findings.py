@@ -1,6 +1,6 @@
 """Rule-based findings for Application and Network Load Balancer access logs.
 
-Every rule is plain SQL over the ``lb`` table built by ``logsift.lb``. ALB logs are one
+Every rule is plain SQL over the ``lb`` table built by ``table.py`` next door. ALB logs are one
 line per request, so the rules talk about status codes, targets and paths. NLB logs are
 one line per TLS connection, so they talk about handshakes, alerts and connection churn.
 Thresholds are simple and written next to each rule.
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
-from logsift.formats import Format
+from logsift.formats.base import Format
 from logsift.insights.base import (
     Finding,
     Severity,

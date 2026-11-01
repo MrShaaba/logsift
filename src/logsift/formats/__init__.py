@@ -1,7 +1,8 @@
 """Format detection through the plug-in registry.
 
-Every format lives in its own module under this package with a detector, a canonical
-table builder and a findings module behind the :class:`FormatPlugin` interface.
+Every format lives in its own sub-package here: the detector in ``__init__.py``, the
+canonical table builder in ``table.py`` and the rules in ``findings.py``, all behind the
+:class:`FormatPlugin` interface in ``base.py``.
 ``detect_format`` asks each plug-in in ``PLUGINS`` order and the first match wins, so the
 order matters where shapes overlap and is written down next to the list.
 """
