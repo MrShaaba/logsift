@@ -55,3 +55,12 @@ def test_inspect_cloudtrail_export(samples: Path, capsys: pytest.CaptureFixture)
     assert "[HIGH  ] The root account made 11 calls, 4 of them changes" in out
     assert "[MEDIUM] shop-web-role was refused 181 calls in 30 minutes" in out
     assert "Likely cause: Resources appearing in a region nobody works in" in out
+
+
+def test_inspect_s3_access_log(samples: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["inspect", str(samples / "s3_access_logs.log"), "-v"]) == 0
+    out = capsys.readouterr().out
+    assert "S3 server access log" in out
+    assert "[HIGH  ] 15 anonymous requests succeeded, reading 13 objects (4.1 GB)" in out
+    assert "[MEDIUM] shop-reports-role was refused 72 requests under exports/finance/" in out
+    assert "Likely cause: Add s3:GetObject on exports/finance/*" in out

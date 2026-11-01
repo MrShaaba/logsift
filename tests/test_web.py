@@ -135,3 +135,21 @@ def test_cloudtrail_overview_explore_and_export(client: TestClient) -> None:
     rows = client.get(f"{url}/export/rows.csv?finding=console-mfa").text.splitlines()
     assert len(rows) == 4 and rows[0].startswith("event_time,event_name,service,principal")
     assert client.get(f"{url}/export/findings.xlsx").status_code == 200
+
+
+def test_s3_overview_explore_and_export(client: TestClient) -> None:
+    r = client.post("/load-sample", data={"name": "s3_access_logs.log"}, follow_redirects=False)
+    url = r.headers["location"]
+    page = client.get(url)
+    assert page.status_code == 200
+    assert "S3 server access log" in page.text
+    assert "Requests against errors (4xx and 5xx), per minute" in page.text
+    assert "15 anonymous requests succeeded, reading 13 objects (4.1 GB)" in page.text
+    assert "bob deleted 300 objects in 3 minutes under images/thumbs/" in page.text
+    r = client.get(f"{url}/explore?finding=missing-keys-1")
+    assert r.status_code == 200 and "of 478" in r.text
+    r = client.get(f"{url}/rows?col=principal&val=anonymous&sort=bytes_sent&desc=1")
+    assert "of 75" in r.text
+    rows = client.get(f"{url}/export/rows.csv?finding=anonymous-reads").text.splitlines()
+    assert len(rows) == 16 and rows[0].startswith("time,remote_ip,principal,operation,key")
+    assert client.get(f"{url}/export/findings.xlsx").status_code == 200
