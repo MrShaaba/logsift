@@ -1,7 +1,7 @@
 [project]
 name = "logsift"
 version = "0.1.0"
-description = "Drop in a CSV or log file and understand it right away. Local-only profiling and VPC Flow Log insights."
+description = "Drop in a CSV or log file and understand it right away. Local-only profiling and rule-based findings for AWS logs."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Bello Mohammed" }]

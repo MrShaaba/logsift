@@ -5,21 +5,23 @@ Drop in a CSV or log file and understand it right away.
 logsift is a small local tool for the moment you open an unfamiliar CSV or log export and
 lose time working out what the columns mean and where the interesting rows are. You drop a
 file in and get a plain-English read of it: what the file is, what each column holds, and,
-for AWS VPC Flow Logs, load balancer access logs and CloudTrail exports, where traffic is
-breaking and what looks unusual.
+for AWS VPC Flow Logs, load balancer access logs, CloudTrail exports and S3 server access
+logs, where traffic is breaking and what looks unusual.
 
 ![logsift showing findings for a VPC Flow Log](docs/screenshot.png)
 
 ## Who it is for
 
 Engineers who get handed a flow log export, a load balancer access log, a CloudTrail
-download, a CloudWatch Logs Insights CSV or a random data dump and want answers before
-writing a single query. The cases it cares about most are VPC Flow Logs (rejected flows,
-one-way flows, a blocked return path, a port sweep, a noisy host, gaps in the capture), ALB
-and NLB access logs (a target failing behind a passing health check, a burst of 5xx, a slow
-endpoint, rejected TLS handshakes) and CloudTrail event exports (a key being tested against
-every action it might have, console sign-ins without MFA, root activity, instances appearing
-in a region nobody uses).
+download, an S3 access log, a CloudWatch Logs Insights CSV or a random data dump and want
+answers before writing a single query. The cases it cares about most are VPC Flow Logs
+(rejected flows, one-way flows, a blocked return path, a port sweep, a noisy host, gaps in
+the capture), ALB and NLB access logs (a target failing behind a passing health check, a
+burst of 5xx, a slow endpoint, rejected TLS handshakes), CloudTrail event exports (a key
+being tested against every action it might have, console sign-ins without MFA, root
+activity, instances appearing in a region nobody uses) and S3 server access logs (a public
+prefix being read anonymously, a stranger guessing file names, 404s piling up under one
+prefix after a cleanup, a batch role refused on a schedule).
 
 ## What it does
 
@@ -30,10 +32,12 @@ in a region nobody uses).
   `pkt-srcaddr`, `flow-direction` and `traffic-path`), CloudWatch Logs Insights exports
   (flow fields either as parsed columns or inside `@message`), Application Load Balancer
   access logs (every documented field, older files with fewer fields included), Network
-  Load Balancer TLS access logs, and CloudTrail event exports as CSV: the console's event
+  Load Balancer TLS access logs, CloudTrail event exports as CSV (the console's event
   history download, a CloudTrail Lake or Athena result, or a flattened export with columns
-  like `userIdentity.type`. Header names are matched loosely, so `Event name`, `eventName`
-  and `eventname` all work.
+  like `userIdentity.type`; header names are matched loosely, so `Event name`, `eventName`
+  and `eventname` all work), and S3 server access logs (the bracketed timestamp and quoted
+  request line, older files with fewer fields included). Each format is a plug-in, see
+  [Adding a format](#adding-a-format).
 - **Profiles every column**: inferred type, count, missing, distinct, min/max/mean/median,
   earliest/latest for dates, top values and a small histogram, with a short "what this
   file looks like" summary on top.
@@ -74,6 +78,19 @@ in a region nobody uses).
   - API calls in regions holding under five percent of the account's regional activity,
     high severity when something was created there and low when it was all read-only
   - a principal, service and source address overview, and a timeline of calls against errors
+- **Finds problems in S3 server access logs** the same way. The requester ARN becomes a
+  `principal` (or `anonymous`), the key gets a two-level `prefix`, and the request line is
+  split into method, path and query:
+  - anonymous requests that succeeded, by prefix, address and the largest objects read: a
+    bucket policy or ACL open to everyone, with the prefixes to treat as disclosed
+  - anonymous requests that were refused, told apart as background noise or one address
+    guessing dozens of file names worth stealing
+  - failed requests by status and error code, key prefix, principal and client address
+  - 404s piling up under one prefix, with the pages still linking to the keys and, when the
+    file shows it, who deleted them and when
+  - a signed principal refused on a schedule, with the IAM action to grant
+  - a burst of deletes by one principal, rated high when the keys were requested afterwards
+  - a who-uses-the-bucket overview, and a timeline of requests against errors
 - **Explores** rows in a paginated table with search, a column filter and sorting, and a
   click from any finding straight to its rows.
 - **Exports** findings and filtered rows as CSV, JSON and `.xlsx` (bold frozen header, real
@@ -83,6 +100,8 @@ in a region nobody uses).
 ![logsift showing findings for an ALB access log](docs/screenshot-alb.png)
 
 ![logsift showing findings for a CloudTrail export](docs/screenshot-cloudtrail.png)
+
+![logsift showing findings for an S3 server access log](docs/screenshot-s3.png)
 
 Everything runs locally. Nothing is uploaded, there is no telemetry, no accounts and no
 cloud resources. Findings are rules, not models.
@@ -114,8 +133,8 @@ directory overrides for `logsift serve`.
 ## Sample data
 
 `samples/` holds fictional files produced by `scripts/generate_samples.py` (seeded, so the
-output is reproducible). The flow logs, load balancer logs and CloudTrail export cover the
-same two hour window and have known problems planted in them:
+output is reproducible). The flow logs, load balancer logs, CloudTrail export and S3 access
+log cover the same two hour window and have known problems planted in them:
 
 | Problem | Where to look |
 | --- | --- |
@@ -136,13 +155,19 @@ same two hour window and have known problems planted in them:
 | `carol` and the root account signing in to the console with a password alone | "3 console sign-ins without MFA, 1 by the root account" |
 | Root creating `backup-admin`, attaching `AdministratorAccess` and making it an access key | "The root account made 11 calls, 4 of them changes" |
 | `backup-admin` launching instances in `ap-southeast-1` and `us-east-2` | "22 calls in 2 regions this account rarely uses" |
+| A bucket policy letting anyone list the bucket and read `backups/`, and `203.0.113.61` pulling 4 GB of database dumps unsigned | "15 anonymous requests succeeded, reading 13 objects (4.1 GB)" |
+| `198.51.100.77` guessing sixty file names (`.env`, `backup.sql`, `id_rsa`) without credentials | "60 anonymous requests were refused, all from 198.51.100.77" |
+| `bob` deleting three hundred thumbnails with the CLI while the shop still links to them | "bob deleted 300 objects in 3 minutes", "478 requests for objects that do not exist under images/thumbs/" |
+| `shop-reports-role` missing permission on `exports/finance/` and retrying every five minutes | "shop-reports-role was refused 72 requests under exports/finance/" |
+| An upload spike throttled with 503 SlowDown | "By status and error code" table under "625 requests failed" |
 
 Addresses come from the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
 203.0.113.0/24) and private 10.x space, and the account is the example `123456789012`.
 The load balancer logs use `shop.example.com` and `api.example.com`. The CloudTrail export
 uses the documentation access key ids (`AKIAIOSFODNN7EXAMPLE` and friends) and carries the
-full event record in its last column, the way the console's CSV download does.
-`daily_sales.csv` is a generic CSV for a made-up coffee shop.
+full event record in its last column, the way the console's CSV download does. The S3 log
+is for a bucket called `shop-assets-example`, with presigned URLs signed by those same
+example keys. `daily_sales.csv` is a generic CSV for a made-up coffee shop.
 
 Regenerate with `uv run python scripts/generate_samples.py`.
 
@@ -159,23 +184,49 @@ Layout:
 
 ```
 src/logsift/
-  loader.py       delimiter and header sniffing, typed loading into DuckDB, parse warnings
-  formats.py      format detection, flow-log, ALB, NLB and CloudTrail field dictionaries
-  flow.py         canonical typed flow table
-  lb.py           typed lb table for ALB and NLB logs, with derived columns
-  trail.py        typed trail table for CloudTrail exports, identity and MFA derived
-  profile.py      per-column profile and the plain-English summary
-  insights/       rule-based findings: flowlogs.py, lblogs.py and cloudtrail.py
-  explore.py      paginated search and filter queries
-  export.py       CSV, JSON and .xlsx writers
-  report.py       self-contained HTML report
-  web/            FastAPI app, Jinja2 templates, vendored HTMX and CSS
-  cli.py          logsift serve | report | inspect
+  loader.py         delimiter and header sniffing, typed loading into DuckDB, parse warnings
+  formats/          one plug-in per format
+    base.py         Format, FormatInfo and the FormatPlugin interface
+    __init__.py     the ordered registry (PLUGINS) and detect_format
+    generic.py      the fallback: any delimited file, no table, no rules
+    vpcflow/        VPC Flow Logs and CloudWatch Logs Insights exports
+    loadbalancer/   ALB and NLB access logs
+    cloudtrail/     CloudTrail event exports
+    s3access/       S3 server access logs
+                    each with __init__.py (detector), table.py (typed table), findings.py (rules)
+  insights/base.py  Finding, Severity and Table, and the text helpers the rules share
+  sql.py            identifier and literal quoting
+  dataset.py        a loaded file: connection, format, table, profile, findings
+  profile.py        per-column profile and the plain-English summary
+  explore.py        paginated search and filter queries
+  export.py         CSV, JSON and .xlsx writers
+  report.py         self-contained HTML report
+  web/              FastAPI app, Jinja2 templates, vendored HTMX and CSS
+  cli.py            logsift serve | report | inspect
 scripts/generate_samples.py
 samples/
 tests/
 ```
 
+### Adding a format
+
+Every format is a plug-in: a sub-package under `src/logsift/formats/` with three parts
+behind one small interface, `FormatPlugin` in `formats/base.py`:
+
+- `detect(sniff)` looks at the first few hundred parsed lines and returns a `FormatInfo`
+  (the kind, a label, the raw-to-canonical column mapping and a one-line reason shown in
+  the UI), or `None` when the file is not in this format.
+- `build_table(con, fmt)` creates the plug-in's typed table from the `raw` rows DuckDB
+  loaded and returns its column names. The explorer, the profile and the exports all read
+  that table.
+- `findings(ds)` and `timeline(ds)` run plain SQL over that table and return `Finding`
+  objects and a good-against-bad series.
+
+Set `name`, `table` and `dash_means_missing` on the class, register an instance in
+`PLUGINS` in `formats/__init__.py`, and that is all: `Dataset` finds the plug-in by name.
+The list is ordered and the first plug-in to recognise a file owns it, so put a specific
+shape before a general one. `tests/test_plugins.py` registers a toy plug-in and walks the
+whole path from detection to findings in twenty lines.
 See [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## License

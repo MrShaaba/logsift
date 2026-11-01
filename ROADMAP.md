@@ -19,12 +19,19 @@ are done; everything else is not started.
       from S3 (gzipped JSON with a `Records` array), data events such as S3 object reads,
       failed console sign-in bursts as their own finding, and a baseline of "normal"
       regions and addresses learned from a longer file rather than from the file itself
-- [ ] S3 server access logs (bracketed timestamps, quoted request lines; findings for
-      4xx by key prefix and anonymous access)
+- [x] S3 server access logs (bracketed timestamps, quoted request lines; findings for
+      4xx by key prefix and anonymous access). Done in `formats/s3access/` with the sample
+      `s3_access_logs.log`, plus refused principals, delete bursts and a usage overview.
+      Not covered yet: telling CloudFront origin requests from other callers, access
+      point and website endpoint specifics (the columns are kept, no rules use them),
+      isolating the hot key prefix behind 503 SlowDown, and bytes per prefix over time
 - [ ] Route 53 Resolver query logs (JSON lines and CSV; findings for NXDOMAIN bursts and
       one client querying many names)
-- [ ] A format plug-in interface so each format ships its own detector, canonical table
-      builder and rule set
+- [x] A format plug-in interface so each format ships its own detector, canonical table
+      builder and rule set. `FormatPlugin` in `formats/base.py`, one sub-package per
+      format, an ordered registry in `formats/__init__.py`. Not covered yet: discovering
+      plug-ins from other packages through entry points, and letting a plug-in add its
+      own template fragments to the overview page
 
 ## Large files
 
