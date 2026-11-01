@@ -31,6 +31,7 @@ class Format(StrEnum):
     ALB = "alb_access"
     NLB = "nlb_access"
     CLOUDTRAIL = "cloudtrail_csv"
+    S3_ACCESS = "s3_access"
 
 
 @dataclass

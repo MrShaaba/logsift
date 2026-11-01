@@ -33,6 +33,7 @@ def test_every_sample_is_claimed_by_its_plugin(samples: Path) -> None:
         "alb_access_logs.log": ("load_balancer", "lb"),
         "nlb_access_logs.log": ("load_balancer", "lb"),
         "cloudtrail_events.csv": ("cloudtrail", "trail"),
+        "s3_access_logs.log": ("s3_access", "s3"),
         "daily_sales.csv": ("generic", ""),
     }
     for name, (plugin, table) in expect.items():

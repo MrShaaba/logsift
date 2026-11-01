@@ -13,6 +13,7 @@ from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, posit
 from logsift.formats.cloudtrail import CloudTrailPlugin
 from logsift.formats.generic import GenericPlugin
 from logsift.formats.loadbalancer import LoadBalancerPlugin
+from logsift.formats.s3access import S3AccessPlugin
 from logsift.formats.vpcflow import CloudWatchInsightsPlugin, VpcFlowPlugin
 from logsift.loader import Sniff
 
@@ -31,6 +32,8 @@ __all__ = [
 PLUGINS: list[FormatPlugin] = [
     # Space-delimited lines without a header, starting with the listener type.
     LoadBalancerPlugin(),
+    # Space-delimited lines without a header, with a bracketed timestamp third.
+    S3AccessPlugin(),
     # Any header with CloudWatch's @-prefixed fields, flow log or not. Checked before
     # CloudTrail so a Logs Insights export keeps its CloudWatch label.
     CloudWatchInsightsPlugin(),

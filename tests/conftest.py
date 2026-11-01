@@ -51,6 +51,11 @@ def trail_ds() -> Dataset:
     return Dataset.open(SAMPLES / "cloudtrail_events.csv")
 
 
+@pytest.fixture(scope="session")
+def s3_ds() -> Dataset:
+    return Dataset.open(SAMPLES / "s3_access_logs.log")
+
+
 def write(tmp_path: Path, name: str, text: str, *, bom: bool = False, gz: bool = False) -> Path:
     data = text.encode("utf-8")
     if bom:

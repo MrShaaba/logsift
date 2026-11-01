@@ -19,6 +19,7 @@ def test_sample_formats(samples: Path) -> None:
         "alb_access_logs.log": Format.ALB,
         "nlb_access_logs.log": Format.NLB,
         "cloudtrail_events.csv": Format.CLOUDTRAIL,
+        "s3_access_logs.log": Format.S3_ACCESS,
     }
     for name, kind in expect.items():
         info = detect_format(sniff(samples / name))
@@ -201,4 +202,37 @@ def test_event_columns_without_aws_sources_stay_generic(tmp_path: Path) -> None:
         f"Standup,2026-03-10T08:0{i}:00Z,calendar\n" for i in range(9)
     )
     info = detect_format(sniff(write(tmp_path, "cal.csv", text)))
+    assert info.kind == Format.GENERIC
+
+
+def test_s3_maps_positional_columns(samples: Path) -> None:
+    info = detect_format(sniff(samples / "s3_access_logs.log"))
+    assert info.plugin == "s3_access" and info.table == "s3" and info.has_rules
+    assert info.dash_means_missing
+    assert info.columns["column_3"] == "time"
+    assert info.columns["column_4"] == "time_offset"
+    assert info.columns["column_8"] == "operation"
+    assert info.columns["column_10"] == "request_uri"
+    assert info.columns["column_27"] == "acl_required"
+    assert len(info.columns) == 27
+    assert "bracketed timestamp" in info.reasons[0]
+
+
+def test_older_s3_log_with_fewer_fields(samples: Path, tmp_path: Path) -> None:
+    lines = (samples / "s3_access_logs.log").read_text().splitlines()[:20]
+    older = [join_fields(fields_of(ln)[:19]) for ln in lines]
+    info = detect_format(sniff(write(tmp_path, "old.log", "\n".join(older) + "\n")))
+    assert info.kind == Format.S3_ACCESS
+    assert info.columns["column_19"] == "version_id"
+    assert "tls_version" not in info.columns.values()
+
+
+def test_s3_shaped_line_with_odd_operation_is_generic(samples: Path, tmp_path: Path) -> None:
+    lines = (samples / "s3_access_logs.log").read_text().splitlines()[:20]
+    broken = []
+    for ln in lines:
+        fields = fields_of(ln)
+        fields[7] = "get-object"
+        broken.append(join_fields(fields))
+    info = detect_format(sniff(write(tmp_path, "odd.log", "\n".join(broken) + "\n")))
     assert info.kind == Format.GENERIC
