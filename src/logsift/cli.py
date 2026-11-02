@@ -1,4 +1,4 @@
-"""Command line entry point: ``logsift serve`` and ``logsift report <file>``."""
+"""Command line entry point: ``logsift serve``, ``report``, ``inspect`` and ``investigations``."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import IO
 from logsift import __version__
 from logsift.dataset import SAMPLE_ROWS
 from logsift.insights.base import fmt_bytes
+from logsift.investigations import InvestigationStore
 from logsift.loader import LoadProgress
 
 
@@ -90,9 +91,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_report(args: argparse.Namespace) -> int:
-    from logsift.report import write_report
+def investigation_store(args: argparse.Namespace) -> InvestigationStore:
+    return InvestigationStore(Path(args.data_dir) / "investigations")
 
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from logsift.report import write_investigation_report, write_report
+
+    if args.investigation:
+        if args.file:
+            print("give a file or --investigation, not both", file=sys.stderr)
+            return 2
+        inv = investigation_store(args).find(args.investigation)
+        if inv is None:
+            print(f"no investigation called {args.investigation!r}", file=sys.stderr)
+            return 2
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in inv.name).strip("_")
+        out = Path(args.output) if args.output else Path(f"{safe or inv.id}.investigation.html")
+        write_investigation_report(inv, out)
+        print(f"wrote {out}")
+        return 0
+    if not args.file:
+        print("give a file to report on, or --investigation", file=sys.stderr)
+        return 2
     path = Path(args.file)
     if not path.is_file():
         print(f"not a file: {path}", file=sys.stderr)
@@ -103,6 +124,25 @@ def cmd_report(args: argparse.Namespace) -> int:
     )
     printer.done()
     print(f"wrote {out}")
+    return 0
+
+
+def cmd_investigations(args: argparse.Namespace) -> int:
+    found = investigation_store(args).list()
+    if not found:
+        print("no investigations yet; pin a finding or a row in the web UI to start one")
+        return 0
+    for inv in found:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(inv.updated))
+        print(
+            f"{inv.id}  {inv.name}  ({len(inv.findings)} findings, {len(inv.rows)} rows, "
+            f"changed {when})"
+        )
+        if args.verbose:
+            if inv.notes:
+                print(f"    {inv.notes.splitlines()[0]}")
+            for pin in inv.pins:
+                print(f"    - {pin.title} [{pin.dataset_name}]")
     return 0
 
 
@@ -165,11 +205,29 @@ def build_parser() -> argparse.ArgumentParser:
     serve.set_defaults(func=cmd_serve)
 
     sample_help = "only read the first N rows (default: the whole file)"
-    report = sub.add_parser("report", help="write a self-contained HTML report")
-    report.add_argument("file")
+    data_dir_help = "where the web UI keeps its data (default: %(default)s)"
+    report = sub.add_parser(
+        "report", help="write a self-contained HTML report for a file or an investigation"
+    )
+    report.add_argument("file", nargs="?", help="the file to report on")
     report.add_argument("-o", "--output", help="output path (default: <file>.report.html)")
     report.add_argument("--sample", type=int, metavar="N", help=sample_help)
+    report.add_argument(
+        "--investigation",
+        metavar="NAME_OR_ID",
+        help="export a saved investigation instead of a file",
+    )
+    report.add_argument(
+        "--data-dir", default=os.environ.get("LOGSIFT_DATA_DIR", "data"), help=data_dir_help
+    )
     report.set_defaults(func=cmd_report)
+
+    investigations = sub.add_parser("investigations", help="list the saved investigations")
+    investigations.add_argument("-v", "--verbose", action="store_true", help="show the pins")
+    investigations.add_argument(
+        "--data-dir", default=os.environ.get("LOGSIFT_DATA_DIR", "data"), help=data_dir_help
+    )
+    investigations.set_defaults(func=cmd_investigations)
 
     inspect = sub.add_parser("inspect", help="print the summary and findings to the terminal")
     inspect.add_argument("file")

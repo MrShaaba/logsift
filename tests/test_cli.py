@@ -119,3 +119,72 @@ def test_progress_printer_on_a_terminal_and_a_pipe() -> None:
     assert pipe.getvalue() == "building the table, 20 rows loaded\n"
     quiet.done()
     assert pipe.getvalue() == "building the table, 20 rows loaded\n"
+
+
+def test_investigations_list_and_export(
+    samples: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    from logsift.dataset import Dataset
+    from logsift.investigations import InvestigationStore, Pin
+
+    data = tmp_path / "data"
+    assert main(["investigations", "--data-dir", str(data)]) == 0
+    assert "no investigations yet" in capsys.readouterr().out
+    store = InvestigationStore(data / "investigations")
+    inv = store.create("Slow reports")
+    ds = Dataset.open(samples / "alb_access_logs.log")
+    try:
+        f = ds.finding("slow-requests")
+        assert f is not None
+        inv.add(Pin.of_finding(ds, f))
+        row = Pin.of_row(ds, 2)
+        assert row is not None
+        inv.add(row)
+    finally:
+        ds.close()
+    inv.notes = "The export endpoint again.\nSecond line."
+    store.save(inv)
+
+    assert main(["investigations", "--data-dir", str(data), "-v"]) == 0
+    out = capsys.readouterr().out
+    assert f"{inv.id}  Slow reports  (1 findings, 1 rows" in out
+    assert "    The export endpoint again." in out
+    assert "    - 60 slow requests took 2 s or more, 8 timed out [alb_access_logs.log]" in out
+    assert "    - Row 2 [alb_access_logs.log]" in out
+
+    out_path = tmp_path / "slow.html"
+    assert (
+        main(
+            [
+                "report",
+                "--investigation",
+                "slow reports",
+                "--data-dir",
+                str(data),
+                "-o",
+                str(out_path),
+            ]
+        )
+        == 0
+    )
+    html = out_path.read_text()
+    assert "60 slow requests took 2 s or more" in html and "<style>" in html
+    assert "The export endpoint again." in html and "1 pinned rows" in html
+    assert "<form" not in html
+    assert str(out_path) in capsys.readouterr().out
+    # Default name comes from the investigation; by id works too.
+    monkey_cwd = tmp_path / "cwd"
+    monkey_cwd.mkdir()
+    import os
+
+    old = os.getcwd()
+    os.chdir(monkey_cwd)
+    try:
+        assert main(["report", "--investigation", inv.id, "--data-dir", str(data)]) == 0
+    finally:
+        os.chdir(old)
+    assert (monkey_cwd / "Slow_reports.investigation.html").exists()
+    assert main(["report", "--investigation", "nope", "--data-dir", str(data)]) == 2
+    assert "no investigation called" in capsys.readouterr().err
+    assert main(["report", "--investigation", inv.id, str(samples / "daily_sales.csv")]) == 2
+    assert main(["report"]) == 2
