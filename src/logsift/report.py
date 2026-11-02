@@ -9,6 +9,7 @@ from typing import Any
 
 from logsift import __version__
 from logsift.dataset import Dataset
+from logsift.diff import CutoverReport
 from logsift.explore import RowQuery, fetch_page
 from logsift.investigations import Investigation
 from logsift.web.render import make_env, static_text
@@ -75,4 +76,52 @@ def render_investigation(inv: Investigation) -> str:
 
 def write_investigation_report(inv: Investigation, out: Path) -> Path:
     out.write_text(render_investigation(inv), encoding="utf-8")
+    return out
+
+
+def cutover_context(report: CutoverReport) -> dict[str, Any]:
+    """Template context shared by the cutover page and its standalone export."""
+    tl = report.timeline
+    charts = None
+    if tl:
+        peak = max(
+            [a + r for a, r in zip(tl["before"]["accepted"], tl["before"]["rejected"], strict=True)]
+            + [a + r for a, r in zip(tl["after"]["accepted"], tl["after"]["rejected"], strict=True)]
+            or [1]
+        )
+        charts = {
+            "peak": peak,
+            "before": {"bucket": tl["bucket"], "labels": tl["labels"], "series": tl["before"]},
+            "after": {"bucket": tl["bucket"], "labels": tl["labels"], "series": tl["after"]},
+            "good": tl["good"],
+            "bad": tl["bad"],
+            "unit": tl["unit"],
+            "title": tl["title"],
+        }
+    evidence = {c.id: report.evidence(c) for c in report.changes if c.rows}
+    return {
+        "report": report,
+        "before": report.before,
+        "after": report.after,
+        "alignment": report.alignment,
+        "changes": report.changes,
+        "charts": charts,
+        "evidence": evidence,
+    }
+
+
+def render_cutover(report: CutoverReport) -> str:
+    """A self-contained HTML page for a cutover diff."""
+    env = make_env()
+    return env.get_template("cutover.html").render(
+        standalone=True,
+        css=static_text("app.css"),
+        generated=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+        version=__version__,
+        **cutover_context(report),
+    )
+
+
+def write_cutover_report(report: CutoverReport, out: Path) -> Path:
+    out.write_text(render_cutover(report), encoding="utf-8")
     return out

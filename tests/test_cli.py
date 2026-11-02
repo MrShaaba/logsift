@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -188,3 +189,41 @@ def test_investigations_list_and_export(
     assert "no investigation called" in capsys.readouterr().err
     assert main(["report", "--investigation", inv.id, str(samples / "daily_sales.csv")]) == 2
     assert main(["report"]) == 2
+
+
+def test_diff_prints_the_verdict_and_writes_the_report(
+    samples: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    before = str(samples / "cutover_before_flow_logs.log")
+    after = str(samples / "cutover_after_flow_logs.log")
+    assert main(["diff", before, after, "-v"]) == 0
+    out = capsys.readouterr().out
+    assert "cutover_before_flow_logs.log -> cutover_after_flow_logs.log: VPC Flow Logs" in out
+    assert "60 minutes compared from each file's first record" in out
+    assert "VERDICT: REGRESSION  (3 regressions, 2 to review, 1 clean)" in out
+    assert "[REGRESSION] New rejected traffic: 180 flows to 1 destination" in out
+    assert "[REVIEW    ] Traffic that disappeared" in out
+    assert "10.0.3.20:5432 TCP was accepted 360 times before" in out
+    # A pipeline gate.
+    assert main(["diff", before, after, "--fail-on", "regression"]) == 1
+    assert main(["diff", before, before, "--fail-on", "review"]) == 0
+    capsys.readouterr()
+    # HTML and JSON.
+    html_path = tmp_path / "cutover.html"
+    assert main(["diff", before, after, "-o", str(html_path), "--json"]) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["verdict"] == "regression" and data["window_minutes"] == 60
+    assert [c["id"] for c in data["changes"]][:2] == ["bad-share", "new-rejects"]
+    assert f"wrote {html_path}" in captured.err
+    html = html_path.read_text()
+    assert "<style>" in html and "/static/" not in html and "<form" not in html
+    assert "Cutover report" in html and 'class="banner regression"' in html
+    assert "Lost return path: replies to 86 requests" in html
+    assert "Evidence: first 25 of 180 rows from the after file" in html
+    assert "Evidence: first 25 of 440 rows from the before file" in html
+    assert "per minute since each file's start" in html
+    # Mismatched formats and missing files.
+    assert main(["diff", before, str(samples / "daily_sales.csv")]) == 2
+    assert "cannot compare" in capsys.readouterr().err
+    assert main(["diff", before, str(tmp_path / "nope.log")]) == 2

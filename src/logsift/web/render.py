@@ -77,7 +77,10 @@ class TimelineGeometry:
     bucket: str
 
 
-def timeline_geometry(tl: dict[str, Any], width: int = 880, height: int = 170) -> TimelineGeometry:
+def timeline_geometry(
+    tl: dict[str, Any], width: int = 880, height: int = 170, max_value: int | None = None
+) -> TimelineGeometry:
+    """Bar geometry for a timeline; ``max_value`` lets two charts share one scale."""
     labels: list[str] = tl["labels"]
     acc: list[int] = tl["series"]["accepted"]
     rej: list[int] = tl["series"]["rejected"]
@@ -86,7 +89,8 @@ def timeline_geometry(tl: dict[str, Any], width: int = 880, height: int = 170) -
     plot_w = width - pad_left - 8
     plot_h = height - pad_bottom - pad_top
     good, bad = tl.get("good", "accepted"), tl.get("bad", "rejected")
-    max_value = max([a + r for a, r in zip(acc, rej, strict=True)] or [1]) or 1
+    peak = max([a + r for a, r in zip(acc, rej, strict=True)] or [1]) or 1
+    max_value = max(peak, max_value or 0)
     slot = plot_w / n
     bar_w = max(1.0, slot * 0.8)
     accepted: list[Bar] = []

@@ -1,4 +1,4 @@
-"""Command line entry point: ``logsift serve``, ``report``, ``inspect`` and ``investigations``."""
+"""Command line entry point: serve, report, inspect, diff and investigations."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import IO
 
 from logsift import __version__
+from logsift.cutover import Verdict
 from logsift.dataset import SAMPLE_ROWS
 from logsift.insights.base import fmt_bytes
 from logsift.investigations import InvestigationStore
@@ -127,6 +128,59 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    import json
+
+    from logsift.dataset import Dataset
+    from logsift.diff import DiffError, compare
+    from logsift.report import write_cutover_report
+
+    paths = [Path(args.before), Path(args.after)]
+    for p in paths:
+        if not p.is_file():
+            print(f"not a file: {p}", file=sys.stderr)
+            return 2
+    printer = ProgressPrinter()
+    before = Dataset.open(paths[0], limit=args.sample, progress=printer)
+    after = Dataset.open(paths[1], limit=args.sample, progress=printer)
+    printer.done()
+    try:
+        report = compare(before, after)
+    except DiffError as exc:
+        print(f"cannot compare: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, default=str))
+    else:
+        al = report.alignment
+        print(f"{before.name} -> {after.name}: {before.format.label}")
+        print(
+            f"{al.minutes} minutes compared from each file's first record"
+            + (f"; the {al.trimmed} file was cut to that length" if al.trimmed else "")
+        )
+        for ds, note in ((before, "before"), (after, "after")):
+            if ds.is_sample:
+                print(f"  {note}: {sample_note(ds)}")
+        print()
+        print(
+            f"VERDICT: {report.verdict.upper()}  ({len(report.regressions)} regressions, "
+            f"{len(report.reviews)} to review, {len(report.clean)} clean)"
+        )
+        for c in report.changes:
+            print(f"  [{c.verdict.upper():10s}] {c.title}")
+            if args.verbose:
+                print(f"               {c.summary}")
+    if args.output:
+        out = write_cutover_report(report, Path(args.output))
+        print(f"wrote {out}", file=sys.stderr if args.json else sys.stdout)
+    before.close()
+    after.close()
+    fail = {"review": (Verdict.REVIEW, Verdict.REGRESSION), "regression": (Verdict.REGRESSION,)}
+    if args.fail_on and report.verdict in fail[args.fail_on]:
+        return 1
+    return 0
+
+
 def cmd_investigations(args: argparse.Namespace) -> int:
     found = investigation_store(args).list()
     if not found:
@@ -221,6 +275,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir", default=os.environ.get("LOGSIFT_DATA_DIR", "data"), help=data_dir_help
     )
     report.set_defaults(func=cmd_report)
+
+    diff = sub.add_parser(
+        "diff", help="compare a before and an after file of one format: the cutover report"
+    )
+    diff.add_argument("before")
+    diff.add_argument("after")
+    diff.add_argument("-o", "--output", help="also write the report as a self-contained HTML page")
+    diff.add_argument("-v", "--verbose", action="store_true", help="print each change's summary")
+    diff.add_argument("--json", action="store_true", help="print the report as JSON instead")
+    diff.add_argument("--sample", type=int, metavar="N", help=sample_help)
+    diff.add_argument(
+        "--fail-on",
+        choices=["review", "regression"],
+        help="exit 1 when the verdict is this bad or worse, for a pipeline gate",
+    )
+    diff.set_defaults(func=cmd_diff)
 
     investigations = sub.add_parser("investigations", help="list the saved investigations")
     investigations.add_argument("-v", "--verbose", action="store_true", help="show the pins")

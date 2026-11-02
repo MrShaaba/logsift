@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Cutover: {{ before.name }} → {{ after.name }}: logsift{% endblock %}
+{% block content %}
+<h1>Cutover report <span class="muted" style="font-weight:400">{{ before.name }} → {{ after.name }}</span></h1>
+<p class="muted">
+  <span class="badge soft">{{ before.format.label }}</span>
+  {{ alignment.minutes }} minutes compared from each file's first record.
+  {% if alignment.trimmed %}The {{ alignment.trimmed }} file is longer and was cut to that length.{% endif %}
+  {% if standalone %}Report written {{ generated }} by logsift {{ version }}.{% endif %}
+</p>
+
+<div class="banner {{ report.verdict }}">
+  <span class="big">{{ report.verdict }}</span>
+  <span class="counts">{{ report.regressions | length }} regressions, {{ report.reviews | length }} to review, {{ report.clean | length }} clean</span>
+  {% if not standalone %}<span style="margin-left:auto"><a class="btn small secondary" style="background:#fff" href="/diff/{{ before.id }}/{{ after.id }}/report.html">Export as HTML</a></span>{% endif %}
+</div>
+
+<div class="pair">
+  <div class="card">
+    <h3>Before: {{ before.name }}</h3>
+    <div class="muted">{{ before.rows | num }} rows, {{ alignment.before_full[0] | cell }} to {{ alignment.before_full[1] | cell }}</div>
+    <div>Compared window: {{ alignment.before_start | cell }} to {{ alignment.before_end | cell }} ({{ report.totals.before_rows | num }} rows)</div>
+    {% if not standalone %}<p style="margin:8px 0 0"><a href="/d/{{ before.id }}">Overview</a> · <a href="/d/{{ before.id }}/explore">Explore</a></p>{% endif %}
+  </div>
+  <div class="card">
+    <h3>After: {{ after.name }}</h3>
+    <div class="muted">{{ after.rows | num }} rows, {{ alignment.after_full[0] | cell }} to {{ alignment.after_full[1] | cell }}</div>
+    <div>Compared window: {{ alignment.after_start | cell }} to {{ alignment.after_end | cell }} ({{ report.totals.after_rows | num }} rows)</div>
+    {% if not standalone %}<p style="margin:8px 0 0"><a href="/d/{{ after.id }}">Overview</a> · <a href="/d/{{ after.id }}/explore">Explore</a></p>{% endif %}
+  </div>
+</div>
+
+{% if charts %}
+<h2>{{ charts.title }}, per {{ charts.before.bucket }} since each file's start</h2>
+<div class="pair">
+  {% for side in ('before', 'after') %}
+  {% set g = timeline_geometry(charts[side], max_value=charts.peak) %}
+  <div class="card">
+    <h3 style="margin-top:0">{{ side | capitalize }}</h3>
+    <div class="legend"><span><i style="background:var(--ok)"></i>{{ charts.good }}</span><span><i style="background:var(--bad)"></i>{{ charts.bad }}</span><span class="muted">peak {{ charts.peak | num }} {{ charts.unit }}</span></div>
+    <svg class="timeline" viewBox="0 0 {{ g.width }} {{ g.height }}" width="100%" preserveAspectRatio="none" style="height:{{ g.height }}px" role="img" aria-label="{{ side }} {{ charts.title | lower }}">
+      <line x1="40" y1="{{ g.height - 24 }}" x2="{{ g.width }}" y2="{{ g.height - 24 }}"/>
+      <text x="0" y="14">{{ g.max_value | num }}</text>
+      <text x="0" y="{{ g.height - 28 }}">0</text>
+      {% for b in g.accepted %}<rect class="acc" x="{{ '%.1f' % b.x }}" y="{{ '%.1f' % b.y }}" width="{{ '%.1f' % b.w }}" height="{{ '%.1f' % b.h }}"><title>{{ b.label }}</title></rect>{% endfor %}
+      {% for b in g.rejected %}<rect class="rej" x="{{ '%.1f' % b.x }}" y="{{ '%.1f' % b.y }}" width="{{ '%.1f' % b.w }}" height="{{ '%.1f' % b.h }}"><title>{{ b.label }}</title></rect>{% endfor %}
+      {% for x, label in g.ticks %}<text x="{{ '%.1f' % x }}" y="{{ g.height - 8 }}" text-anchor="middle">{{ label }}</text>{% endfor %}
+    </svg>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if report.regressions %}
+<h2>Regressions <span class="muted" style="font-weight:400;font-size:14px">{{ report.regressions | length }}</span></h2>
+{% with changes = report.regressions %}{% include "_changes.html" %}{% endwith %}
+{% endif %}
+{% if report.reviews %}
+<h2>To review <span class="muted" style="font-weight:400;font-size:14px">{{ report.reviews | length }}</span></h2>
+{% with changes = report.reviews %}{% include "_changes.html" %}{% endwith %}
+{% endif %}
+{% if report.clean %}
+<h2>Clean <span class="muted" style="font-weight:400;font-size:14px">{{ report.clean | length }}</span></h2>
+{% with changes = report.clean %}{% include "_changes.html" %}{% endwith %}
+{% endif %}
+{% endblock %}

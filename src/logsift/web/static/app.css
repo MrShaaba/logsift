@@ -124,3 +124,17 @@ textarea, .pin-note input[type=text] { width: 100%; padding: 8px 10px; border: 1
 tr.note-row td { border-bottom: 1px solid var(--line); background: var(--bg); white-space: normal; }
 tr.note-row form { margin: 0; }
 p.notes { white-space: pre-wrap; }
+.verdict { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #fff; text-transform: uppercase; vertical-align: middle; }
+.verdict.clean { background: var(--ok); } .verdict.review { background: var(--medium); } .verdict.regression { background: var(--bad); }
+.banner { border-radius: 10px; padding: 16px 20px; margin: 12px 0 18px; color: #fff; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.banner.clean { background: var(--ok); } .banner.review { background: var(--medium); } .banner.regression { background: var(--bad); }
+.banner .big { font-size: 22px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.banner .counts { opacity: .95; }
+.change { border-left: 5px solid var(--info); }
+.change.regression { border-left-color: var(--bad); } .change.review { border-left-color: var(--medium); } .change.clean { border-left-color: var(--ok); }
+.change h3 { margin: 0 0 6px; font-size: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.change .numbers { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: 6px 0; }
+.change .numbers b { color: var(--text); font-size: 15px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.pair .card h3 { margin-top: 0; }
+.muted-row td { color: var(--muted); }
