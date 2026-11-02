@@ -38,6 +38,15 @@
     </div>
   </details>
   {% endfor %}
+  {% if f.query %}
+  <details class="query">
+    <summary>CloudWatch Logs Insights query</summary>
+    <div class="query-box">
+      <button class="btn small secondary copy" type="button" data-copy="query-{{ f.id }}">Copy</button>
+      <pre id="query-{{ f.id }}">{{ f.query }}</pre>
+    </div>
+  </details>
+  {% endif %}
   {% if standalone and f.sample_rows %}
   <details>
     <summary>First {{ f.sample_rows.rows | length }} of {{ f.row_count | num }} rows</summary>

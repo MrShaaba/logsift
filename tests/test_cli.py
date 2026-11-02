@@ -17,6 +17,16 @@ def test_inspect_prints_summary_and_findings(samples: Path, capsys: pytest.Captu
     assert "Likely cause:" in out
 
 
+def test_inspect_can_print_the_queries(samples: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["inspect", str(samples / "s3_access_logs.log"), "--queries"]) == 0
+    out = capsys.readouterr().out
+    assert "[HIGH  ] 15 anonymous requests succeeded" in out
+    assert "           # S3 server access logs are delivered to a bucket" in out
+    assert '           | filter requester = "-" and http_status < 400' in out
+    assert main(["inspect", str(samples / "s3_access_logs.log")]) == 0
+    assert "| filter" not in capsys.readouterr().out
+
+
 def test_inspect_load_balancer_log(samples: Path, capsys: pytest.CaptureFixture) -> None:
     assert main(["inspect", str(samples / "nlb_access_logs.log")]) == 0
     out = capsys.readouterr().out
@@ -34,6 +44,7 @@ def test_report_is_self_contained(
     assert "Return traffic blocked" in html
     assert "<style>" in html and "/static/" not in html
     assert "First 25 of 1,280 rows" in html
+    assert "CloudWatch Logs Insights query" in html and "button.copy" in html
     assert "What this file looks like" in html
     assert str(out) in capsys.readouterr().out
 

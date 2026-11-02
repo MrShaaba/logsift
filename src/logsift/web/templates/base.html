@@ -29,6 +29,24 @@
 {% block content %}{% endblock %}
 <footer>Everything runs locally. Nothing is uploaded and no model is involved; every finding is a rule.</footer>
 </main>
+<script>
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest('button.copy');
+  if (!btn) return;
+  var pre = document.getElementById(btn.getAttribute('data-copy'));
+  if (!pre) return;
+  var text = pre.textContent;
+  var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); };
+  var fallback = function () {
+    var range = document.createRange(); range.selectNodeContents(pre);
+    var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    btn.textContent = 'Selected: press copy';
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } else { fallback(); }
+});
+</script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

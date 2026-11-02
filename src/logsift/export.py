@@ -26,6 +26,7 @@ FINDING_COLUMNS = [
     "likely_cause",
     "row_count",
     "rule",
+    "query",
 ]
 
 
@@ -107,6 +108,7 @@ def findings_rows(findings: list[Finding]) -> Rows:
             f.likely_cause,
             f.row_count,
             f.rule,
+            f.query,
         )
         for f in findings
     ]

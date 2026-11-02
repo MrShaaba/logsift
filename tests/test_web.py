@@ -56,6 +56,18 @@ def test_explore_filters_and_pages(client: TestClient, flow_url: str) -> None:
     assert "No rows match" in r.text
 
 
+def test_finding_cards_carry_a_logs_insights_query(client: TestClient, flow_url: str) -> None:
+    r = client.get(flow_url)
+    assert "CloudWatch Logs Insights query" in r.text
+    assert 'data-copy="query-reject-cluster-1"' in r.text
+    assert "button.copy" in r.text  # the copy handler ships with the page
+    assert "| filter (log_status = &#34;-&#34; or log_status = &#34;OK&#34;) and action" in r.text
+    data = client.get(f"{flow_url}/export/findings.json").json()
+    assert all(f["query"].startswith("# ") for f in data)
+    header = client.get(f"{flow_url}/export/findings.csv").text.splitlines()[0]
+    assert header.endswith(",rule,query")
+
+
 def test_exports(client: TestClient, flow_url: str) -> None:
     for fmt, ctype in (("csv", "text/csv"), ("json", "application/json"), ("xlsx", "sheet")):
         r = client.get(f"{flow_url}/export/findings.{fmt}")

@@ -133,6 +133,11 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 print(f"           {f.summary}")
                 if f.likely_cause:
                     print(f"           Likely cause: {f.likely_cause}")
+            if args.queries and f.query:
+                print()
+                for line in f.query.splitlines():
+                    print(f"           {line}")
+                print()
     ds.close()
     return 0
 
@@ -169,6 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="print the summary and findings to the terminal")
     inspect.add_argument("file")
     inspect.add_argument("-v", "--verbose", action="store_true")
+    inspect.add_argument(
+        "--queries",
+        action="store_true",
+        help="print the CloudWatch Logs Insights query under each finding",
+    )
     inspect.add_argument("--sample", type=int, metavar="N", help=sample_help)
     inspect.set_defaults(func=cmd_inspect)
     return parser
