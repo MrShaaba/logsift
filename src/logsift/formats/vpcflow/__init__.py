@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
+from logsift.formats.vpcflow.cutover import flow_cutover_checks, flow_health
 from logsift.formats.vpcflow.findings import build_timeline, run_rules
 from logsift.formats.vpcflow.table import FLOW_FIELDS, V2_FIELDS, build_flow_table, canonical
 from logsift.insights.cwlogs import QuerySpec, parse_clause, private_ip
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
+    from logsift.cutover import Change, DiffContext, Health
     from logsift.dataset import Dataset
     from logsift.insights.base import Finding
 
@@ -92,6 +94,7 @@ class VpcFlowPlugin(FormatPlugin):
     name = "vpc_flow"
     table = "flow"
     dash_means_missing = True
+    time_column = "start_ts"
 
     def detect(self, sn: Sniff) -> FormatInfo | None:
         cols = sn.columns
@@ -135,6 +138,12 @@ class VpcFlowPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def health(self, columns: set[str]) -> Health | None:
+        return flow_health(columns)
+
+    def cutover_checks(self, ctx: DiffContext) -> list[Change]:
+        return flow_cutover_checks(ctx)
 
     def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
         notes: list[str] = []

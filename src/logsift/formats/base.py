@@ -21,6 +21,7 @@ from logsift.loader import Sniff
 from logsift.sql import q
 
 if TYPE_CHECKING:
+    from logsift.cutover import Change, DiffContext, Health
     from logsift.dataset import Dataset
     from logsift.insights.base import Finding
 
@@ -74,6 +75,8 @@ class FormatPlugin(ABC):
     name: str = ""
     table: str = ""
     dash_means_missing: bool = False
+    # The canonical table's time column, for aligning two files in a cutover diff.
+    time_column: str = ""
 
     @abstractmethod
     def detect(self, sn: Sniff) -> FormatInfo | None:
@@ -92,6 +95,14 @@ class FormatPlugin(ABC):
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         """Good against bad rows per time bucket, or None when there is no time column."""
         return None
+
+    def health(self, columns: set[str]) -> Health | None:
+        """What a "bad" row is for this format (rejected, 5xx, failed), or None."""
+        return None
+
+    def cutover_checks(self, ctx: DiffContext) -> list[Change]:
+        """What changed between a before and an after file; see ``logsift.cutover``."""
+        return []
 
     def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
         """How this format's columns map onto a CloudWatch log group, for Logs Insights
