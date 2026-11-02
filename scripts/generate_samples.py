@@ -41,6 +41,17 @@ Planted problems in the S3 server access log (see ``S3_PLANTED``):
 * a cleanup script deleting three hundred thumbnails, and the shop's 404s from then on
 * a batch role missing permission on one prefix and retrying every five minutes
 * a short burst of 503 SlowDown during an upload spike
+
+Planted problems in the Route 53 Resolver query log (see ``RESOLVER_PLANTED``):
+
+* an app host walking through 1,500 algorithmically generated names in twelve minutes,
+  nearly all NXDOMAIN, which is what malware looking for its controller looks like
+* the bastion looking up every host name in the internal zone and the reverse records
+  for a whole subnet in ten minutes: someone mapping the network
+* a web host asking for names on a DNS Firewall block list every twenty seconds, all day
+* an app host moving data over DNS: hundreds of TXT queries with long random labels under
+  one domain, and long answers back
+* six minutes of SERVFAIL for the internal zone while the forwarding endpoint was down
 """
 
 from __future__ import annotations
@@ -2812,6 +2823,235 @@ def write_s3(out: Path, rng: random.Random) -> None:
             fh.write(req.line(rng) + "\n")
 
 
+# ----------------------------------------------------------------------------
+# Route 53 Resolver query logs
+# ----------------------------------------------------------------------------
+
+RESOLVER_PLANTED = {
+    "dga_burst": {"src": "10.0.2.11", "window": ("08:40", "08:52"), "names": 1500},
+    "name_sweep": {"src": "10.0.0.5", "window": ("09:10", "09:20"), "hosts": 600},
+    "firewall_blocks": {"src": "10.0.1.11", "domains": ["bad.example"]},
+    "tunnelling": {"src": "10.0.2.10", "window": ("09:30", "09:50"), "domain": "dns.example.net"},
+    "servfail": {"zone": "corp.example.internal", "window": ("09:00", "09:06")},
+}
+FIREWALL_GROUP = "rslvr-frg-0123456789abcdef0"
+FIREWALL_LIST = "rslvr-fdl-0123456789abcdef0"
+RESOLVER_VERSION = "1.100000"
+
+# What the fleet looks up in a normal hour: (name, type, weight, answers)
+PUBLIC_NAMES: list[tuple[str, str, int, list[str]]] = [
+    ("api.example.com.", "A", 30, ["203.0.113.9"]),
+    ("shop.example.com.", "A", 20, ["203.0.113.10", "203.0.113.11"]),
+    ("cdn.example.com.", "A", 25, ["192.0.2.44", "192.0.2.45"]),
+    ("cdn.example.com.", "AAAA", 8, []),
+    ("auth.example.com.", "A", 10, ["203.0.113.12"]),
+    ("www.example.org.", "A", 6, ["192.0.2.80"]),
+    ("ntp.example.org.", "A", 4, ["192.0.2.123"]),
+    ("s3.eu-west-1.amazonaws.com.", "A", 40, ["198.51.100.200", "198.51.100.201"]),
+    ("dynamodb.eu-west-1.amazonaws.com.", "A", 25, ["198.51.100.202"]),
+    ("ssm.eu-west-1.amazonaws.com.", "A", 15, ["198.51.100.203"]),
+    ("logs.eu-west-1.amazonaws.com.", "A", 15, ["198.51.100.204"]),
+    ("sts.amazonaws.com.", "A", 8, ["198.51.100.205"]),
+    ("ec2.eu-west-1.amazonaws.com.", "A", 6, ["198.51.100.206"]),
+    ("sqs.eu-west-1.amazonaws.com.", "A", 10, ["198.51.100.207"]),
+]
+INTERNAL_NAMES: list[tuple[str, str, int, list[str]]] = [
+    ("db.corp.example.internal.", "A", 30, ["10.0.3.20"]),
+    ("cache.corp.example.internal.", "A", 25, ["10.0.2.30"]),
+    ("queue.corp.example.internal.", "A", 12, ["10.0.2.31"]),
+    ("app.corp.example.internal.", "A", 18, ["10.0.2.10", "10.0.2.11"]),
+    ("metrics.corp.example.internal.", "A", 8, ["10.0.0.40"]),
+    ("vault.corp.example.internal.", "A", 6, ["10.0.0.41"]),
+]
+# Typos and stale names that get NXDOMAIN in any fleet.
+STALE_NAMES = ["api.exmaple.com.", "old-cache.corp.example.internal.", "legacy.example.com."]
+
+
+@dataclass
+class Query:
+    """One Route 53 Resolver query log record."""
+
+    time: datetime
+    src: Host
+    name: str
+    qtype: str
+    rcode: str
+    answers: list[str]
+    transport: str = "UDP"
+    firewall_action: str = ""
+
+    def record(self, rng: random.Random) -> dict[str, object]:
+        answer_type = "TXT" if self.qtype == "TXT" else ("PTR" if self.qtype == "PTR" else "A")
+        rec: dict[str, object] = {
+            "version": RESOLVER_VERSION,
+            "account_id": ACCOUNT,
+            "region": REGION,
+            "vpc_id": VPC,
+            "query_timestamp": self.time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "query_name": self.name,
+            "query_type": self.qtype,
+            "query_class": "IN",
+            "rcode": self.rcode,
+            "answers": [{"Rdata": a, "Type": answer_type, "Class": "IN"} for a in self.answers],
+            "srcaddr": self.src.ip,
+            "srcport": str(rng.randrange(32768, 61000)),
+            "transport": self.transport,
+            "srcids": {"instance": self.src.instance},
+        }
+        if self.firewall_action:
+            rec["firewall_rule_action"] = self.firewall_action
+            rec["firewall_rule_group_id"] = FIREWALL_GROUP
+            rec["firewall_domain_list_id"] = FIREWALL_LIST
+        return rec
+
+
+def ptr_name(ip: str) -> str:
+    return ".".join(reversed(ip.split("."))) + ".in-addr.arpa."
+
+
+def background_queries(rng: random.Random) -> list[Query]:
+    out: list[Query] = []
+    servfail = RESOLVER_PLANTED["servfail"]
+    sf_lo, sf_hi = (at(t) for t in servfail["window"])
+    names = PUBLIC_NAMES + INTERNAL_NAMES
+    weights = [w for _, _, w, _ in names]
+    for host in ALL_HOSTS:
+        # Web and app hosts are busy; the database and bastion barely resolve anything.
+        rate = {"10.0.3.20": 60, "10.0.0.5": 40}.get(host.ip, 900)
+        for _ in range(rate):
+            t = moment(rng)
+            name, qtype, _, answers = rng.choices(names, weights=weights)[0]
+            rcode = "NOERROR"
+            got = list(answers)
+            if name.endswith("corp.example.internal.") and sf_lo <= t < sf_hi:
+                rcode, got = "SERVFAIL", []
+            transport = "TCP" if rng.random() < 0.03 else "UDP"
+            out.append(Query(t, host, name, qtype, rcode, got, transport))
+        for _ in range(rate // 60):
+            out.append(Query(moment(rng), host, rng.choice(STALE_NAMES), "A", "NXDOMAIN", []))
+        for _ in range(rate // 150):
+            target = rng.choice(ALL_HOSTS).ip
+            reverse = [f"host-{target.split('.')[-1]}.corp.example.internal."]
+            out.append(Query(moment(rng), host, ptr_name(target), "PTR", "NOERROR", reverse))
+    return out
+
+
+def dga_name(rng: random.Random) -> str:
+    length = rng.randrange(10, 17)
+    return "".join(rng.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(length))
+
+
+def planted_queries(rng: random.Random) -> list[Query]:
+    out: list[Query] = []
+    by_ip = {h.ip: h for h in ALL_HOSTS}
+
+    # A: something on an app host walks through algorithmically generated names, nearly
+    # all of which do not exist: what malware looking for its controller looks like.
+    p = RESOLVER_PLANTED["dga_burst"]
+    lo, hi = (at(t) for t in p["window"])
+    host = by_ip[p["src"]]
+    for i in range(p["names"]):
+        tld = rng.choice([".example.", ".test.", ".invalid."])
+        t = lo + (hi - lo) * (i / p["names"]) + timedelta(seconds=rng.random() * 0.4)
+        if rng.random() < 0.01:
+            out.append(Query(t, host, dga_name(rng) + tld, "A", "NOERROR", ["198.51.100.66"]))
+        else:
+            out.append(Query(t, host, dga_name(rng) + tld, "A", "NXDOMAIN", []))
+
+    # B: the bastion looks up every host name in the internal zone, and the reverse
+    # records for a whole subnet, in ten minutes: someone mapping the network.
+    p = RESOLVER_PLANTED["name_sweep"]
+    lo, hi = (at(t) for t in p["window"])
+    host = by_ip[p["src"]]
+    for i in range(p["hosts"]):
+        t = lo + (hi - lo) * (i / p["hosts"]) + timedelta(seconds=rng.random() * 0.5)
+        name = f"host-{i + 1}.corp.example.internal."
+        if i % 3 == 0:
+            out.append(Query(t, host, name, "A", "NOERROR", [f"10.0.{1 + i % 3}.{10 + i % 200}"]))
+        else:
+            out.append(Query(t, host, name, "A", "NXDOMAIN", []))
+        if i < 254:
+            known = i % 4 == 0
+            answers = [f"host-{i + 1}.corp.example.internal."] if known else []
+            rcode = "NOERROR" if known else "NXDOMAIN"
+            reverse = ptr_name(f"10.0.1.{i + 1}")
+            out.append(Query(t + timedelta(seconds=0.2), host, reverse, "PTR", rcode, answers))
+
+    # C: a web host keeps asking for names on a DNS Firewall block list, every twenty
+    # seconds, all day: a browser extension or an agent phoning home.
+    p = RESOLVER_PLANTED["firewall_blocks"]
+    host = by_ip[p["src"]]
+    bad = ["cdn.tracker.bad.example.", "update.bad.example.", "c2.bad.example."]
+    t = T0 + timedelta(seconds=7)
+    while t < T0 + DURATION:
+        out.append(Query(t, host, rng.choice(bad), "A", "NXDOMAIN", [], firewall_action="BLOCK"))
+        t += timedelta(seconds=18 + rng.random() * 6)
+
+    # D: an app host sends hundreds of TXT queries whose left-most labels are long
+    # random strings under one domain, and gets long answers back: data moving over DNS.
+    p = RESOLVER_PLANTED["tunnelling"]
+    lo, hi = (at(t) for t in p["window"])
+    host = by_ip[p["src"]]
+    for i in range(700):
+        t = lo + (hi - lo) * (i / 700) + timedelta(seconds=rng.random() * 0.3)
+        chunk = f"{rng.getrandbits(192):048x}"
+        name = f"{chunk}.{rng.getrandbits(32):08x}.{p['domain']}."
+        answer = base64.b64encode(rng.randbytes(45)).decode()
+        out.append(Query(t, host, name, "TXT", "NOERROR", [f'"{answer}"']))
+    return out
+
+
+def resolver_queries(rng: random.Random) -> list[Query]:
+    queries = background_queries(rng) + planted_queries(rng)
+    queries = [qq for qq in queries if T0 <= qq.time < T0 + DURATION]
+    queries.sort(key=lambda qq: (qq.time, qq.src.ip, qq.name))
+    return queries
+
+
+def write_resolver(out: Path, rng: random.Random) -> None:
+    queries = resolver_queries(rng)
+    with (out / "route53_resolver_query_logs.json").open("w") as fh:
+        for qq in queries:
+            fh.write(json.dumps(qq.record(rng), separators=(",", ":")) + "\n")
+    # The same hour as a CSV export, the shape an Athena query over the log gives you.
+    with (out / "route53_resolver_query_logs.csv").open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(
+            [
+                "query_timestamp",
+                "query_name",
+                "query_type",
+                "rcode",
+                "answers",
+                "srcaddr",
+                "srcport",
+                "transport",
+                "instance_id",
+                "vpc_id",
+                "firewall_rule_action",
+            ]
+        )
+        for qq in queries:
+            if qq.time >= T0 + timedelta(hours=1):
+                break
+            rec = qq.record(rng)
+            w.writerow(
+                [
+                    rec["query_timestamp"],
+                    qq.name,
+                    qq.qtype,
+                    qq.rcode,
+                    " ".join(qq.answers),
+                    qq.src.ip,
+                    rec["srcport"],
+                    qq.transport,
+                    qq.src.instance,
+                    VPC,
+                    qq.firewall_action,
+                ]
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", default="samples", help="output directory")
@@ -2827,6 +3067,7 @@ def main() -> None:
     write_nlb(out, random.Random(SEED + 3))
     write_cloudtrail(out, random.Random(SEED + 4))
     write_s3(out, random.Random(SEED + 5))
+    write_resolver(out, random.Random(SEED + 6))
     for p in sorted(out.iterdir()):
         print(f"{p.name:40s} {p.stat().st_size / 1024:8.0f} KB")
 

@@ -77,3 +77,33 @@ def test_s3_sample_is_fictional() -> None:
     keys = set(re.findall(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", text))
     assert keys and all("EXAMPLE" in k for k in keys)
     assert "shop-assets-example" in text
+
+
+@pytest.mark.parametrize(
+    "name", ["route53_resolver_query_logs.json", "route53_resolver_query_logs.csv"]
+)
+def test_resolver_samples_are_fictional(name: str) -> None:
+    import re
+
+    text = (ROOT / "samples" / name).read_text()
+    # Reverse lookups spell addresses backwards (1.1.0.10.in-addr.arpa); skip those.
+    ips = set(re.findall(IP_RE, re.sub(r"[0-9.]+\.in-addr\.arpa\.", "", text)))
+    assert ips and all(ip.startswith(ALLOWED_PREFIXES) for ip in ips)
+    names = set(re.findall(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?=[\s\",])", text))
+    assert names
+    allowed = (
+        "example.com.",
+        "example.net.",
+        "example.org.",
+        "example.internal.",
+        "amazonaws.com.",
+        "in-addr.arpa.",
+        ".example.",
+        ".test.",
+        ".invalid.",
+        "exmaple.com.",
+    )
+    odd = sorted(n for n in names if not n.endswith(allowed))
+    assert not odd, odd[:5]
+    if name.endswith(".json"):
+        assert "123456789012" in text
