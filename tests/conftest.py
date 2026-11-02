@@ -56,6 +56,11 @@ def s3_ds() -> Dataset:
     return Dataset.open(SAMPLES / "s3_access_logs.log")
 
 
+@pytest.fixture(scope="session")
+def dns_ds() -> Dataset:
+    return Dataset.open(SAMPLES / "route53_resolver_query_logs.json")
+
+
 def write(tmp_path: Path, name: str, text: str, *, bom: bool = False, gz: bool = False) -> Path:
     data = text.encode("utf-8")
     if bom:

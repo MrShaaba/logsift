@@ -13,6 +13,7 @@ from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, posit
 from logsift.formats.cloudtrail import CloudTrailPlugin
 from logsift.formats.generic import GenericPlugin
 from logsift.formats.loadbalancer import LoadBalancerPlugin
+from logsift.formats.route53resolver import Route53ResolverPlugin
 from logsift.formats.s3access import S3AccessPlugin
 from logsift.formats.vpcflow import CloudWatchInsightsPlugin, VpcFlowPlugin
 from logsift.loader import Sniff
@@ -34,6 +35,10 @@ PLUGINS: list[FormatPlugin] = [
     LoadBalancerPlugin(),
     # Space-delimited lines without a header, with a bracketed timestamp third.
     S3AccessPlugin(),
+    # JSON lines (or a CSV header) with a query name, a response code and a source
+    # address. Checked before the CloudWatch export match so a parsed export of a
+    # resolver log group keeps its rules.
+    Route53ResolverPlugin(),
     # Any header with CloudWatch's @-prefixed fields, flow log or not. Checked before
     # CloudTrail so a Logs Insights export keeps its CloudWatch label.
     CloudWatchInsightsPlugin(),

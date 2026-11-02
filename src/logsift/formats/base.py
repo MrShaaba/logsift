@@ -34,6 +34,7 @@ class Format(StrEnum):
     NLB = "nlb_access"
     CLOUDTRAIL = "cloudtrail_csv"
     S3_ACCESS = "s3_access"
+    ROUTE53_RESOLVER = "route53_resolver"
 
 
 @dataclass

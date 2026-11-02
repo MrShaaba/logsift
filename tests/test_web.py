@@ -167,6 +167,28 @@ def test_s3_overview_explore_and_export(client: TestClient) -> None:
     assert client.get(f"{url}/export/findings.xlsx").status_code == 200
 
 
+def test_resolver_overview_explore_and_export(client: TestClient) -> None:
+    r = client.post(
+        "/load-sample", data={"name": "route53_resolver_query_logs.json"}, follow_redirects=False
+    )
+    url = r.headers["location"]
+    page = client.get(url)
+    assert page.status_code == 200
+    assert "Route 53 Resolver query log" in page.text and "JSON lines" in page.text
+    assert "no header row" not in page.text
+    assert "Answered queries against failed or blocked ones" in page.text
+    assert "DNS Firewall blocked 342 queries for 3 names under bad.example" in page.text
+    assert "Possible DNS tunnel: 10.0.2.10 sent 700 TXT queries" in page.text
+    assert "filter firewall_rule_action = &#34;BLOCK&#34;" in page.text
+    r = client.get(f"{url}/explore?finding=firewall-blocks")
+    assert r.status_code == 200 and "of 342" in r.text
+    r = client.get(f"{url}/rows?col=rcode&val=SERVFAIL&sort=query_time")
+    assert "of 68" in r.text
+    rows = client.get(f"{url}/export/rows.csv?finding=servfail-1").text.splitlines()
+    assert len(rows) == 69 and rows[0].startswith("query_time,srcaddr,query_name,query_type")
+    assert client.get(f"{url}/export/findings.xlsx").status_code == 200
+
+
 def test_sample_full_pass_progress_and_restart(tmp_path: Path, samples: Path) -> None:
     data = tmp_path / "data"
     app = create_app(data_dir=data, samples_dir=samples, sample_rows=2000)
