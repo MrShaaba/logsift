@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 
+from logsift.insights.cwlogs import QuerySpec, build_query
 from logsift.loader import Sniff
+from logsift.sql import q
 
 if TYPE_CHECKING:
     from logsift.dataset import Dataset
@@ -89,6 +91,29 @@ class FormatPlugin(ABC):
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         """Good against bad rows per time bucket, or None when there is no time column."""
         return None
+
+    def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
+        """How this format's columns map onto a CloudWatch log group, for Logs Insights
+        queries. None when the format has no CloudWatch counterpart."""
+        return None
+
+    def insights_query(self, ds: Dataset, finding: Finding) -> str:
+        """The CloudWatch Logs Insights query that selects the rows behind ``finding``."""
+        spec = self.query_spec(ds.format)
+        if spec is None:
+            return ""
+        columns = {c for c, _ in ds.columns}
+        file_range: tuple[Any, Any] = (None, None)
+        time_col = next((c for c in spec.time_columns if c in columns), None)
+        if time_col:
+            row = (
+                ds.cursor()
+                .execute(f"SELECT min({q(time_col)}), max({q(time_col)}) FROM {q(ds.table)}")
+                .fetchone()
+            )
+            if row and all(hasattr(v, "strftime") for v in row):
+                file_range = (row[0], row[1])
+        return build_query(finding, spec, file_range)
 
     def found(
         self,

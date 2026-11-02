@@ -165,7 +165,12 @@ class Dataset:
 
     @cached_property
     def findings(self) -> list[Finding]:
-        return self.plugin.findings(self) if self.has_rules else []
+        if not self.has_rules:
+            return []
+        found = self.plugin.findings(self)
+        for f in found:
+            f.query = self.plugin.insights_query(self, f)
+        return found
 
     @cached_property
     def timeline(self) -> dict[str, Any] | None:

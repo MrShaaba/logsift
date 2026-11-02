@@ -11,6 +11,7 @@ import duckdb
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
 from logsift.formats.vpcflow.findings import build_timeline, run_rules
 from logsift.formats.vpcflow.table import FLOW_FIELDS, V2_FIELDS, build_flow_table, canonical
+from logsift.insights.cwlogs import QuerySpec, parse_clause, private_ip
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
@@ -27,6 +28,48 @@ __all__ = [
 ]
 
 ACTIONS = {"ACCEPT", "REJECT", "-"}
+
+# The field names CloudWatch Logs discovers in a default-format flow log group.
+CW_FLOW_FIELDS = {
+    "version": "version",
+    "account_id": "accountId",
+    "interface_id": "interfaceId",
+    "srcaddr": "srcAddr",
+    "dstaddr": "dstAddr",
+    "srcport": "srcPort",
+    "dstport": "dstPort",
+    "protocol": "protocol",
+    "packets": "packets",
+    "bytes": "bytes",
+    "start": "start",
+    "end": "end",
+    "action": "action",
+    "log_status": "logStatus",
+}
+FLOW_DISPLAY = ["srcaddr", "srcport", "dstaddr", "dstport", "protocol", "action", "bytes"]
+# SYN set and ACK clear, written as the values flow logs can hold (FIN, SYN, RST, SYN-ACK).
+SYN_ONLY_SQL = r"\(tcp_flags & 2\) <> 0 AND \(tcp_flags & 16\) = 0"
+SYN_ONLY_NOTE = (
+    "tcp_flags 2, 3, 6 and 7 are the values with SYN set and ACK clear; flow logs only "
+    "record FIN, SYN, RST and SYN-ACK."
+)
+FLOW_STATS = {
+    "rejected_traffic": (
+        "stats count(*) as flows by {dstaddr}, {dstport}, {protocol} | sort flows desc | limit 50"
+    ),
+    "rejected_cluster": (
+        "stats count(*) as flows, sum({bytes}) as bytes by {srcaddr} | sort flows desc | limit 50"
+    ),
+    "top_talkers": (
+        "stats sum({bytes}) as bytes, count(*) as flows by {dstaddr}, {dstport} "
+        "| sort bytes desc | limit 50"
+    ),
+    "public_traffic": (
+        "stats count(*) as flows, sum({bytes}) as bytes by {srcaddr}, {dstaddr} "
+        "| sort bytes desc | limit 50"
+    ),
+    "port_sweep": "stats count(*) as flows by {dstport} | sort {dstport} asc | limit 1000",
+}
 STATUSES = {"OK", "NODATA", "SKIPDATA"}
 ENI_RE = re.compile(r"^eni-[0-9a-f]{8,17}$")
 ACCOUNT_RE = re.compile(r"^\d{12}$")
@@ -92,6 +135,33 @@ class VpcFlowPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
+        notes: list[str] = []
+        parse = ""
+        if fmt.kind == Format.VPC_CUSTOM:
+            # CloudWatch only discovers the default fields; a custom format is parsed out of
+            # @message in the file's own order, under the canonical names.
+            names = list(fmt.columns.values())
+            fields = {n: n for n in names}
+            parse = parse_clause(names)
+            notes.append(
+                "Custom format: CloudWatch does not discover these fields, so they are "
+                "parsed out of @message in the file's own field order."
+            )
+        else:
+            fields = dict(CW_FLOW_FIELDS)
+        return QuerySpec(
+            fields=fields,
+            time_columns=("start_ts", "start"),
+            funcs={"is_private": private_ip},
+            parse=parse,
+            display=[fields[c] for c in FLOW_DISPLAY if c in fields],
+            missing="-",
+            rewrites=[(SYN_ONLY_SQL, "tcp_flags IN (2, 3, 6, 7)", SYN_ONLY_NOTE)],
+            stats=FLOW_STATS,
+            notes=notes,
+        )
 
 
 class CloudWatchInsightsPlugin(VpcFlowPlugin):

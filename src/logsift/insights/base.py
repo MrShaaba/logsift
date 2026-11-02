@@ -45,6 +45,8 @@ class Finding:
     tables: list[Table] = field(default_factory=list)
     # Optional series for a chart: {"labels": [...], "series": {"name": [...]}}
     chart: dict[str, Any] | None = None
+    # The CloudWatch Logs Insights query that selects these rows, filled in by the dataset.
+    query: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +59,7 @@ class Finding:
             "likely_cause": self.likely_cause,
             "row_count": self.row_count,
             "tables": [{"title": t.title, "rows": t.to_dicts()} for t in self.tables],
+            "query": self.query,
         }
 
 

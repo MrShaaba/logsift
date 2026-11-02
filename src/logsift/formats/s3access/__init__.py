@@ -11,6 +11,7 @@ import duckdb
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, positional
 from logsift.formats.s3access.findings import build_timeline, run_rules
 from logsift.formats.s3access.table import build_s3_table
+from logsift.insights.cwlogs import QuerySpec, boolean, like, parse_clause, regex_escape
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
@@ -50,6 +51,77 @@ S3_FIELDS = [
     "acl_required",
 ]
 S3_MIN_FIELDS = 19
+
+# For parsing a line in Logs Insights: the bracketed time is one field there.
+S3_PARSE_FIELDS = [f for f in S3_FIELDS if f != "time_offset"]
+S3_QUOTED = {"request_uri", "referer", "user_agent"}
+S3_NOTE = (
+    "S3 server access logs are delivered to a bucket, not CloudWatch Logs. This query "
+    "assumes the lines were shipped to a log group as they are; the same conditions work "
+    "in Athena."
+)
+S3_DISPLAY = [
+    "time",
+    "remote_ip",
+    "requester",
+    "operation",
+    "key",
+    "http_status",
+    "error_code",
+    "bytes_sent",
+]
+S3_STATS = {
+    "errors": (
+        "stats count(*) as requests by {http_status}, {error_code} | sort requests desc | limit 50"
+    ),
+    "missing_keys": "stats count(*) as requests by {key} | sort requests desc | limit 50",
+    "access_denied": "stats count(*) as requests by {key} | sort requests desc | limit 50",
+    "delete_burst": (
+        "stats count(*) as deletes by {remote_ip}, {user_agent} | sort deletes desc | limit 50"
+    ),
+    "top_clients": (
+        "stats count(*) as requests, sum({bytes_sent}) as bytes by {operation} "
+        "| sort requests desc | limit 50"
+    ),
+}
+
+
+def principal_field(op: str, value: object) -> str | None:
+    if op not in ("=", "<>") or not isinstance(value, str):
+        return None
+    if value == "anonymous":
+        text = 'requester = "-"'
+    elif value == "bucket owner":
+        return None
+    else:
+        text = f"requester like /{regex_escape(value)}/"
+    return text if op == "=" else f"not ({text})"
+
+
+def prefix_field(op: str, value: object) -> str | None:
+    if op not in ("=", "<>") or not isinstance(value, str):
+        return None
+    if value == "(bucket)":
+        text = 'key = "-"'
+    elif value == "(no prefix)":
+        text = 'key not like "/"'
+    else:
+        text = f"key like /^{regex_escape(value)}/"
+    return text if op == "=" else f"not ({text})"
+
+
+S3_DERIVED = {
+    "is_error": boolean("http_status >= 400", "http_status < 400"),
+    "anonymous": boolean('requester = "-"', 'requester != "-"'),
+    "principal": principal_field,
+    "prefix": prefix_field,
+    "verb": like("operation", "^[A-Z0-9]+\\.{v}\\."),
+    "target": like("operation", "^[A-Z0-9]+\\.[A-Z_]+\\.{v}$"),
+    "method": like("request_uri", "^{v} "),
+    "path": like("request_uri", "^[A-Z]+ {v}(\\?| )"),
+    "query": lambda op, v: None,
+    "http_version": like("request_uri", " {v}$"),
+}
 
 TIME_RE = re.compile(r"^\[\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2}$")
 OFFSET_RE = re.compile(r"^[+-]\d{4}\]$")
@@ -95,3 +167,15 @@ class S3AccessPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
+        return QuerySpec(
+            fields={n: n for n in S3_PARSE_FIELDS},
+            time_columns=("time",),
+            derived=S3_DERIVED,
+            parse=parse_clause(S3_PARSE_FIELDS, quoted=S3_QUOTED, brackets={"time"}),
+            display=S3_DISPLAY,
+            missing="-",
+            stats=S3_STATS,
+            notes=[S3_NOTE],
+        )

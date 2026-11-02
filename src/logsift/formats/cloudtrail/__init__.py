@@ -9,7 +9,8 @@ import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
 from logsift.formats.cloudtrail.findings import build_timeline, run_rules
-from logsift.formats.cloudtrail.table import build_trail_table
+from logsift.formats.cloudtrail.table import GLOBAL_SERVICES, build_trail_table
+from logsift.insights.cwlogs import QuerySpec, boolean, mapped, regex_escape
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
@@ -67,6 +68,85 @@ TRAIL_FIELDS: dict[str, str] = {
 }
 TRAIL_REQUIRED = {"event_time", "event_name", "event_source"}
 
+# The event record's own JSON names, as CloudWatch Logs discovers them in a trail's group.
+CW_TRAIL_FIELDS = {
+    "event_time": "eventTime",
+    "event_name": "eventName",
+    "event_source": "eventSource",
+    "aws_region": "awsRegion",
+    "source_ip": "sourceIPAddress",
+    "error_code": "errorCode",
+    "error_message": "errorMessage",
+    "user_agent": "userAgent",
+    "read_only": "readOnly",
+    "event_type": "eventType",
+    "event_category": "eventCategory",
+    "event_id": "eventID",
+    "request_id": "requestID",
+    "recipient_account_id": "recipientAccountId",
+    "identity_type": "userIdentity.type",
+    "identity_arn": "userIdentity.arn",
+    "user_name": "userIdentity.userName",
+    "access_key_id": "userIdentity.accessKeyId",
+    "login_result": "responseElements.ConsoleLogin",
+}
+TRAIL_DISPLAY = [
+    "eventTime",
+    "eventSource",
+    "eventName",
+    "userIdentity.arn",
+    "sourceIPAddress",
+    "awsRegion",
+    "errorCode",
+]
+GLOBAL_SOURCES = ", ".join(f'"{s}.amazonaws.com"' for s in GLOBAL_SERVICES if s != "sts")
+TRAIL_STATS = {
+    "access_denied": (
+        "stats count(*) as calls by {identity_arn}, {event_name} | sort calls desc | limit 50"
+    ),
+    "denied_burst": (
+        "stats count(*) as calls by {event_source}, {event_name}, {error_code} "
+        "| sort calls desc | limit 50"
+    ),
+    "unusual_regions": (
+        "stats count(*) as calls by {aws_region}, {event_name} | sort calls desc | limit 50"
+    ),
+    "top_principals": "stats count(*) as calls by {event_name} | sort calls desc | limit 50",
+}
+
+
+def service_field(op: str, value: object) -> str | None:
+    if op not in ("=", "<>") or not isinstance(value, str):
+        return None
+    text = f'eventSource = "{value}.amazonaws.com"'
+    return text if op == "=" else f"not ({text})"
+
+
+def principal_field(op: str, value: object) -> str | None:
+    """``principal`` is the user or role name cut out of the identity ARN."""
+    if op not in ("=", "<>") or not isinstance(value, str):
+        return None
+    if value == "root":
+        text = 'userIdentity.type = "Root"'
+    else:
+        text = f"userIdentity.arn like /[:/]{regex_escape(value)}(/|$)/"
+    return text if op == "=" else f"not ({text})"
+
+
+TRAIL_DERIVED = {
+    "service": service_field,
+    "principal": principal_field,
+    "is_root": boolean('userIdentity.type = "Root"'),
+    "access_denied": boolean(
+        "errorCode like /AccessDenied|Unauthorized|Forbidden|AuthorizationError/"
+    ),
+    "global_service": boolean(
+        f"(eventSource in [{GLOBAL_SOURCES}] "
+        'or (eventSource = "sts.amazonaws.com" and awsRegion = "us-east-1"))'
+    ),
+    "mfa_used": mapped("additionalEventData.MFAUsed", {True: '"Yes"', False: '"No"'}),
+}
+
 
 def trail_mapping(cols: list[str]) -> dict[str, str]:
     """Map header names onto CloudTrail field names; unknown columns keep their own name."""
@@ -117,3 +197,12 @@ class CloudTrailPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
+        return QuerySpec(
+            fields=dict(CW_TRAIL_FIELDS),
+            time_columns=("event_time",),
+            derived=TRAIL_DERIVED,
+            display=TRAIL_DISPLAY,
+            stats=TRAIL_STATS,
+        )
