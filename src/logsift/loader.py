@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import json
 import re
 import tempfile
 import uuid
@@ -37,6 +38,9 @@ DELIMITERS: dict[str, str] = {
     "|": "pipe",
     " ": "space",
 }
+# A JSON-lines file is read as one text column per line; this byte never occurs in JSON.
+JSON_LINES_DELIMITER = "\x01"
+JSON_LINES_COLUMN = "line"
 CAST_THRESHOLD = 0.995
 INFER_SAMPLE_ROWS = 50_000
 # Whole lines are read in chunks of about this many bytes and staged in a temp file.
@@ -59,10 +63,17 @@ class Sniff:
     gzip: bool = False
     bom: bool = False
     field_counts: Counter[int] = field(default_factory=Counter)
+    # One JSON object per line: loaded as a single text column named "line".
+    json_lines: bool = False
 
     @property
     def delimiter_name(self) -> str:
         return DELIMITERS.get(self.delimiter, repr(self.delimiter))
+
+    @property
+    def layout(self) -> str:
+        """How the file is laid out, for the UI: "comma-delimited" or "JSON lines"."""
+        return "JSON lines" if self.json_lines else f"{self.delimiter_name}-delimited"
 
 
 @dataclass
@@ -224,12 +235,36 @@ def _clean_name(name: str, index: int, seen: set[str]) -> str:
     return candidate
 
 
+def looks_like_json_lines(lines: list[str]) -> bool:
+    """True when nearly every sampled line is a JSON object on its own."""
+    if not lines:
+        return False
+    shaped = [ln.lstrip().startswith("{") and ln.rstrip().endswith("}") for ln in lines]
+    if sum(shaped) / len(lines) < 0.8:
+        return False
+    try:
+        return all(isinstance(json.loads(ln), dict) for ln in lines if ln.lstrip().startswith("{"))
+    except ValueError:
+        return False
+
+
 def sniff(path: Path) -> Sniff:
     path = Path(path)
     gz = is_gzip(path)
     with gzip.open(path, "rb") if gz else path.open("rb") as fh:
         bom = fh.read(3) == b"\xef\xbb\xbf"
     lines, _ = _head_lines(path)
+    if looks_like_json_lines(lines):
+        return Sniff(
+            delimiter=JSON_LINES_DELIMITER,
+            has_header=False,
+            columns=[JSON_LINES_COLUMN],
+            rows=[[ln] for ln in lines[:50]],
+            gzip=gz,
+            bom=bom,
+            field_counts=Counter({1: len(lines)}),
+            json_lines=True,
+        )
     delimiter, counts = detect_delimiter(lines)
     rows = _parse(lines, delimiter) if lines else []
     width = counts.most_common(1)[0][0] if counts else 1
@@ -354,6 +389,8 @@ class ChunkReader:
         self.raw = path.open("rb")
         self.fh: IO[bytes] = gzip.GzipFile(fileobj=self.raw) if sn.gzip else self.raw
         self.gzip = sn.gzip
+        # JSON strings may hold escaped quotes, and a line is always one record there.
+        self.balance_quotes = not sn.json_lines
         self.truncated = False
         if offset:
             self.fh.seek(offset)
@@ -369,14 +406,14 @@ class ChunkReader:
         """The next chunk of lines, at most ``max_lines`` of them; empty at the end."""
         lines = self.fh.readlines(self.chunk_bytes)
         # Never split a quoted field that spans lines across two chunks.
-        while lines and _odd_quotes(lines):
+        while lines and self.balance_quotes and _odd_quotes(lines):
             more = self.fh.readline()
             if not more:
                 break
             lines.append(more)
         if max_lines is not None and len(lines) > max_lines:
             keep = max_lines
-            while keep < len(lines) and _odd_quotes(lines[:keep]):
+            while keep < len(lines) and self.balance_quotes and _odd_quotes(lines[:keep]):
                 keep += 1
             lines = lines[:keep]
             self.offset += sum(len(ln) for ln in lines)
@@ -414,9 +451,10 @@ def read_csv_sql(
     """
     cols = ", ".join(f"{lit(c)}: 'VARCHAR'" for c in sn.columns)
     nulls = ", ".join(lit(n) for n in null_strings)
+    quoting = "quote='', escape=''" if sn.json_lines else "quote='\"', escape='\"'"
     return (
         f"read_csv({lit(str(path))}, delim={lit(sn.delimiter)}, header=false, "
-        f"columns={{{cols}}}, auto_detect=false, quote='\"', escape='\"', nullstr=[{nulls}], "
+        f"columns={{{cols}}}, auto_detect=false, {quoting}, nullstr=[{nulls}], "
         f"null_padding=true, ignore_errors=true, store_rejects=true, "
         f"parallel={'true' if parallel else 'false'})"
     )

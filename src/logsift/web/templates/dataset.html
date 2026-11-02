@@ -4,7 +4,7 @@
 <h1>{{ ds.name }}</h1>
 <p class="muted">
   <span class="badge soft">{{ ds.format.label }}</span>
-  {{ ds.sniff.delimiter_name }}-delimited{% if ds.sniff.has_header %}, header row{% else %}, no header row{% endif %}{% if ds.sniff.gzip %}, gzip{% endif %}{% if ds.sniff.bom %}, byte order mark{% endif %}
+  {{ ds.sniff.layout }}{% if ds.sniff.has_header %}, header row{% elif not ds.sniff.json_lines %}, no header row{% endif %}{% if ds.sniff.gzip %}, gzip{% endif %}{% if ds.sniff.bom %}, byte order mark{% endif %}
   <span class="muted">({{ ds.format.reasons | join('; ') }})</span>
 </p>
 

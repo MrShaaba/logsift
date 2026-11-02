@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from logsift.loader import detect_delimiter, detect_header, load, sniff
+from logsift.loader import detect_delimiter, detect_header, load, load_more, sniff
 from tests.conftest import write
 
 SALES = 'name,qty,price\nbeans,3,7.50\n"tea, loose",12,4.20\nmug,1,16.00\n'
@@ -205,3 +205,45 @@ def test_bad_values_and_rejects_add_up_across_chunks(tmp_path: Path) -> None:
 def test_empty_file_and_header_only(tmp_path: Path) -> None:
     res = load(duckdb.connect(), write(tmp_path, "header.csv", "a,b\n"))
     assert res.rows == 0 and res.complete and [c.name for c in res.columns] == ["a", "b"]
+
+
+def test_json_lines_load_as_one_text_column(tmp_path: Path) -> None:
+    import json
+
+    records = [
+        {"query_name": "a.example.com.", "rcode": "NOERROR", "answers": [{"Rdata": "192.0.2.9"}]},
+        {"query_name": "x.example.net.", "rcode": "NXDOMAIN", "answers": [], "note": 'say "hi"'},
+        {"query_name": "y.example.net.", "rcode": "NOERROR", "answers": [{"Rdata": "a,b"}]},
+    ]
+    text = "".join(json.dumps(r) + "\n" for r in records)
+    for gz in (False, True):
+        path = write(tmp_path, "q.json.gz" if gz else "q.json", text * 40, gz=gz)
+        sn = sniff(path)
+        assert sn.json_lines and sn.columns == ["line"] and not sn.has_header
+        assert sn.layout == "JSON lines" and sn.rows[0] == [json.dumps(records[0])]
+        con = duckdb.connect()
+        res = load(con, path, sn, chunk_bytes=256)
+        assert res.rows == 120 and res.warnings == []
+        assert [c.name for c in res.columns] == ["line"]
+        got = con.execute(
+            "SELECT count(*) FILTER (WHERE json_valid(line)), "
+            "count(*) FILTER (WHERE line->>'$.rcode' = 'NXDOMAIN'), "
+            "count(*) FILTER (WHERE line->>'$.note' = 'say \"hi\"') FROM raw"
+        ).fetchone()
+        assert got == (120, 40, 40)
+        con.close()
+    # A limit and a resume work the same way as for delimited files.
+    con = duckdb.connect()
+    res = load(con, path, sn, limit=50, chunk_bytes=256)
+    assert res.rows == 50 and not res.complete
+    load_more(con, path, sn, res, chunk_bytes=256)
+    assert res.rows == 120 and res.complete
+    con.close()
+
+
+def test_json_lines_detection_is_strict(tmp_path: Path) -> None:
+    assert not sniff(write(tmp_path, "a.csv", "a,b\n{x},2\n")).json_lines
+    assert not sniff(write(tmp_path, "b.txt", "{not json}\n{still not}\n")).json_lines
+    assert not sniff(write(tmp_path, "c.txt", "[1, 2]\n[3, 4]\n")).json_lines
+    sn = sniff(write(tmp_path, "d.json", '{"a": 1}\n\n{"a": 2}\n'))
+    assert sn.json_lines and sn.field_counts == {1: 2}

@@ -13,5 +13,7 @@ class GenericPlugin(FormatPlugin):
         return self.found(
             Format.GENERIC,
             "Generic delimited file",
-            f"{sn.delimiter_name}-separated with {len(sn.columns)} columns",
+            "one JSON object per line"
+            if sn.json_lines
+            else f"{sn.delimiter_name}-separated with {len(sn.columns)} columns",
         )

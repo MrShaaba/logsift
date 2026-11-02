@@ -157,7 +157,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     ds = Dataset.open(path, limit=args.sample, progress=printer)
     printer.done()
     print(f"{ds.name}: {ds.format.label} ({'; '.join(ds.format.reasons)})")
-    print(f"{ds.rows:,} rows, {len(ds.columns)} columns, {ds.sniff.delimiter_name}-delimited")
+    print(f"{ds.rows:,} rows, {len(ds.columns)} columns, {ds.sniff.layout}")
     if ds.is_sample:
         print(f"  {sample_note(ds)}")
     for w in ds.load.warnings:
