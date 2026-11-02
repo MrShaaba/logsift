@@ -263,7 +263,7 @@ def totals_checks(ctx: DiffContext) -> list[Change]:
             "bad-share",
             "bad_share",
             f"{h.bad_label.capitalize()} {unit}: {pct(a_bad, a_rows)} after, "
-            f"{pct(b_bad, b_rows)} before ({describe_change(b_share, a_share)})",
+            f"{pct(b_bad, b_rows)} before (share {describe_change(b_share, a_share)})",
             verdict,
             f"{a_bad:,} of {a_rows:,} {unit} were {h.bad_label} after against {b_bad:,} of "
             f"{b_rows:,} before. {note}",

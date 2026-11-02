@@ -28,6 +28,20 @@
 </div>
 {% endif %}
 
+{% if datasets | length >= 2 %}
+<h2>Compare two files</h2>
+<p class="muted">A before and an after file of the same format: the cutover report says what changed and whether it is a regression.</p>
+<form class="filters" method="post" action="/diff" style="margin-top:4px">
+  <label>Before
+    <select name="before">{% for d in datasets %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}</select>
+  </label>
+  <label>After
+    <select name="after">{% for d in datasets %}<option value="{{ d.id }}" {% if loop.index == 2 %}selected{% endif %}>{{ d.name }}</option>{% endfor %}</select>
+  </label>
+  <button class="btn" type="submit">Compare</button>
+</form>
+{% endif %}
+
 {% if datasets %}
 <h2>Loaded files</h2>
 <p class="muted">Kept in a local DuckDB database under <code>{{ store_dir }}</code>, so they are still here after a restart.</p>

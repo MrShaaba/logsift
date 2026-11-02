@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from logsift.dataset import SAMPLE_ROWS, Dataset
+from logsift.diff import CutoverReport, DiffError, compare
 from logsift.explore import MAX_EXPORT_ROWS, RowQuery, fetch_all, fetch_page
 from logsift.export import (
     CONTENT_TYPES,
@@ -23,7 +24,7 @@ from logsift.export import (
     rows_to_xlsx,
 )
 from logsift.investigations import Investigation, InvestigationStore, Pin
-from logsift.report import render_investigation
+from logsift.report import cutover_context, render_cutover, render_investigation
 from logsift.store import Store
 from logsift.web.render import make_env
 
@@ -45,6 +46,21 @@ class Registry:
         self.investigations = InvestigationStore(data_dir / "investigations")
         # Pins go to the active investigation; the most recently changed one until chosen.
         self.active_id: str | None = None
+        # Cutover reports, keyed by the two files and their row counts (a full pass changes
+        # the rows, and with them the report).
+        self.diffs: dict[tuple[str, int, str, int], CutoverReport] = {}
+
+    def diff(self, before_id: str, after_id: str) -> CutoverReport:
+        before, after = self.get(before_id), self.get(after_id)
+        key = (before.id, before.rows, after.id, after.rows)
+        report = self.diffs.get(key)
+        if report is None:
+            try:
+                report = compare(before, after, workdir=self.store.tmp)
+            except DiffError as exc:
+                raise HTTPException(400, f"These two files cannot be compared: {exc}.") from exc
+            self.diffs[key] = report
+        return report
 
     def active(self) -> Investigation | None:
         if self.active_id:
@@ -94,6 +110,7 @@ class Registry:
         if ds.loading:
             raise HTTPException(409, "That file is still loading. Wait for it to finish first.")
         del self.datasets[ds_id]
+        self.diffs = {k: v for k, v in self.diffs.items() if ds_id not in (k[0], k[2])}
         ds.close()
         self.store.remove(ds_id)
         uploads = self.data_dir / "uploads"
@@ -153,12 +170,31 @@ def create_app(
             if f is None:
                 raise HTTPException(404, "Unknown finding.")
             rq.where = f.row_filter
+        change_key = params.get("change", "")
+        if change_key:
+            rq.where = change_filter(ds, change_key)
         keep = {
             k: v
             for k, v in params.items()
-            if k in ("q", "col", "val", "finding", "sort", "desc") and v
+            if k in ("q", "col", "val", "finding", "change", "sort", "desc") and v
         }
         return rq, keep
+
+    def change_filter(ds: Dataset, key: str) -> str:
+        """The row filter behind ``before_id:after_id:change_id:side`` for this dataset."""
+        parts = key.split(":")
+        if len(parts) != 4 or parts[3] not in ("before", "after"):
+            raise HTTPException(404, "Unknown change.")
+        before_id, after_id, change_id, side = parts
+        if ds.id != (before_id if side == "before" else after_id):
+            raise HTTPException(404, "That change belongs to another file.")
+        change = registry.diff(before_id, after_id).change(change_id)
+        where = (
+            (change.before_filter if side == "before" else change.after_filter) if change else ""
+        )
+        if not where:
+            raise HTTPException(404, "Unknown change.")
+        return where
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -249,6 +285,8 @@ def create_app(
             page=pg,
             qs=urlencode(keep),
             finding=ds.finding(keep["finding"]) if "finding" in keep else None,
+            change=change_label(keep["change"]) if "change" in keep else None,
+            rq_change=keep.get("change", ""),
             filter_col=keep.get("col", ""),
             filter_val=keep.get("val", ""),
             sort=rq.order_by,
@@ -273,6 +311,38 @@ def create_app(
             export_limit=MAX_EXPORT_ROWS,
             **pin_context(ds, f"/d/{ds.id}/explore?{urlencode(keep)}"),
         )
+
+    def change_label(key: str) -> dict[str, str]:
+        before_id, after_id, change_id, side = key.split(":")
+        change = registry.diff(before_id, after_id).change(change_id)
+        return {
+            "title": change.title if change else "",
+            "side": side,
+            "url": f"/diff/{before_id}/{after_id}#change-{change_id}",
+        }
+
+    # ------------------------------------------------------------------ cutover
+
+    @app.get("/diff/{before_id}/{after_id}", response_class=HTMLResponse)
+    def cutover(before_id: str, after_id: str) -> HTMLResponse:
+        report = registry.diff(before_id, after_id)
+        return render("cutover.html", nav="diff", **cutover_context(report))
+
+    @app.get("/diff/{before_id}/{after_id}/report.html")
+    def cutover_report(before_id: str, after_id: str) -> Response:
+        report = registry.diff(before_id, after_id)
+        name = f"{Path(report.before.name).stem}-vs-{Path(report.after.name).stem}.cutover.html"
+        return Response(
+            render_cutover(report),
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    @app.post("/diff")
+    def choose_cutover(before: str = Form(...), after: str = Form(...)) -> RedirectResponse:
+        registry.get(before)
+        registry.get(after)
+        return RedirectResponse(f"/diff/{before}/{after}", status_code=303)
 
     # ------------------------------------------------------------ investigations
 

@@ -96,7 +96,7 @@ def test_cutover_pair_finds_the_planted_regressions(pair: tuple[Dataset, Dataset
 
     share = report.change("bad-share")
     assert share is not None and share.verdict == Verdict.REGRESSION
-    assert share.title == "Rejected flows: 7.8% after, 1.6% before (up 4.9x)"
+    assert share.title == "Rejected flows: 7.8% after, 1.6% before (share up 4.9x)"
     volume = report.change("volume")
     assert volume is not None and volume.verdict == Verdict.CLEAN
     assert volume.title == "Volume: 73.7 flows a minute after, 82.7 before (down 11%)"
@@ -242,7 +242,7 @@ def test_alb_cutover_checks(tmp_path: Path) -> None:
     )
     assert ids["path-errors"].verdict == Verdict.REGRESSION
     assert ids["path-errors"].tables[0].rows[0] == ("/api/products", 148, 0, 192, 81)
-    assert ids["bad-share"].title == "5xx requests: 18.1% after, 0.4% before (up 51.0x)"
+    assert ids["bad-share"].title == "5xx requests: 18.1% after, 0.4% before (share up 51.0x)"
     assert ids["latency"].verdict == Verdict.CLEAN and ids["latency"].unit == "seconds"
     assert ids["latency"].tables[0].rows[0] == ("/api/reports/export", 32, 60.0)
     assert ids["targets"].verdict == Verdict.CLEAN
@@ -257,7 +257,7 @@ def test_nlb_cutover_checks(tmp_path: Path) -> None:
     assert h.verdict == Verdict.REVIEW and h.unit == "connections"
     assert h.title == "Failed handshakes: 192.0.2.80:443 fails 7.9% after, 5.2% before"
     assert h.tables[0].rows == [("192.0.2.80:443", 1793, 94, 1222, 96)]
-    assert ids["bad-share"].title == "Failed connections: 7.9% after, 5.2% before (up 50%)"
+    assert ids["bad-share"].title == "Failed connections: 7.9% after, 5.2% before (share up 50%)"
     assert "not by enough to distrust" in ids["volume"].summary
     assert ids["targets"].title == "The same targets serve traffic before and after"
     assert "latency" not in ids and "target-errors" not in ids

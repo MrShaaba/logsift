@@ -22,7 +22,7 @@
   {% if c.rows and c.id in evidence %}
   {% set ev = evidence[c.id] %}
   <details>
-    <summary>Evidence: first {{ ev.rows | length }} of {{ ev.total | num }} rows from the {{ c.evidence }} file{% if not standalone and (c.after_filter if c.evidence == 'after' else c.before_filter) %}{% endif %}</summary>
+    <summary>Evidence: first {{ ev.rows | length }} of {{ ev.total | num }} rows from the {{ c.evidence }} file</summary>
     <div class="table-wrap" style="margin-top:6px">
     <table class="data">
       <thead><tr>{% for col in ev.columns %}{% if col != 'row_no' %}<th>{{ col }}</th>{% endif %}{% endfor %}</tr></thead>
@@ -31,7 +31,7 @@
     </div>
     {% if not standalone %}
     <p class="meta" style="margin:6px 0 0">
-      {% if c.after_filter %}<a href="/d/{{ after.id }}/explore?change={{ before.id }}:{{ after.id }}:{{ c.id }}:after">All {{ c.after_filter and 'matching' }} rows in the after file</a>{% endif %}
+      {% if c.after_filter %}<a href="/d/{{ after.id }}/explore?change={{ before.id }}:{{ after.id }}:{{ c.id }}:after">All matching rows in the after file</a>{% endif %}
       {% if c.before_filter %}{% if c.after_filter %} · {% endif %}<a href="/d/{{ before.id }}/explore?change={{ before.id }}:{{ after.id }}:{{ c.id }}:before">All matching rows in the before file</a>{% endif %}
     </p>
     {% endif %}

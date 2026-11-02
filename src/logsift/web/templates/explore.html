@@ -5,9 +5,13 @@
 {% if finding %}
 <div class="active-filter">Showing the rows behind <strong>{{ finding.title }}</strong>. <a href="/d/{{ ds.id }}/explore">Clear</a> · <a href="/d/{{ ds.id }}#finding-{{ finding.id }}">Back to the finding</a></div>
 {% endif %}
+{% if change %}
+<div class="active-filter">Showing the {{ change.side }}-file rows behind <strong>{{ change.title }}</strong>. <a href="/d/{{ ds.id }}/explore">Clear</a> · <a href="{{ change.url }}">Back to the cutover report</a></div>
+{% endif %}
 <form class="filters" method="get" action="/d/{{ ds.id }}/explore"
       hx-get="/d/{{ ds.id }}/rows" hx-target="#rows" hx-push-url="false" hx-trigger="submit, change from:select">
   {% if finding %}<input type="hidden" name="finding" value="{{ finding.id }}">{% endif %}
+  {% if change %}<input type="hidden" name="change" value="{{ rq_change }}">{% endif %}
   <label>Search all columns <input type="search" name="q" value="{{ rq.search }}" placeholder="e.g. REJECT or 10.0.3.20"></label>
   <label>Filter column
     <select name="col">

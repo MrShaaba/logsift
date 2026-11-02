@@ -358,3 +358,69 @@ def test_investigations_pin_note_export_and_delete(tmp_path: Path, samples: Path
     # The store survives a restart.
     again = TestClient(create_app(data_dir=tmp_path / "data", samples_dir=samples))
     assert "Second" in again.get("/investigations").text
+
+
+def test_cutover_page_export_and_evidence_links(tmp_path: Path, samples: Path) -> None:
+    app = create_app(data_dir=tmp_path / "data", samples_dir=samples)
+    client = TestClient(app)
+    assert "Compare two files" not in client.get("/").text
+    ids = []
+    for name in ("cutover_before_flow_logs.log", "cutover_after_flow_logs.log", "daily_sales.csv"):
+        r = client.post("/load-sample", data={"name": name}, follow_redirects=False)
+        ids.append(r.headers["location"].rsplit("/", 1)[1])
+    before, after, sales = ids
+    home = client.get("/").text
+    assert "Compare two files" in home and f'<option value="{after}" selected>' in home
+    r = client.post("/diff", data={"before": before, "after": after}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/diff/{before}/{after}"
+
+    page = client.get(f"/diff/{before}/{after}")
+    assert page.status_code == 200
+    assert 'class="banner regression"' in page.text
+    assert "3 regressions, 2 to review, 1 clean" in page.text
+    assert "New rejected traffic: 180 flows to 1 destination" in page.text
+    assert "Evidence: first 25 of 180 rows from the after file" in page.text
+    assert "per minute since each file's start" in page.text
+    link = f"/d/{after}/explore?change={before}:{after}:new-rejects:after"
+    assert f'href="{link}"' in page.text
+    assert f'href="/d/{before}/explore?change={before}:{after}:disappeared:before"' in page.text
+    assert f'href="/diff/{before}/{after}/report.html"' in page.text
+    # The report is cached per pair.
+    registry = app.state.registry
+    assert len(registry.diffs) == 1
+    client.get(f"/diff/{before}/{after}")
+    assert len(registry.diffs) == 1
+
+    r = client.get(link)
+    assert r.status_code == 200 and "of 180" in r.text
+    assert "Showing the after-file rows behind" in r.text
+    assert f'href="/diff/{before}/{after}#change-new-rejects"' in r.text
+    r = client.get(f"/d/{before}/explore?change={before}:{after}:disappeared:before")
+    assert "of 440" in r.text
+    assert (
+        client.get(f"/d/{after}/rows?change={before}:{after}:new-rejects:after&page=2").status_code
+        == 200
+    )
+    # Wrong file, unknown change, malformed key.
+    assert (
+        client.get(f"/d/{before}/explore?change={before}:{after}:new-rejects:after").status_code
+        == 404
+    )
+    assert client.get(f"/d/{after}/explore?change={before}:{after}:nope:after").status_code == 404
+    assert client.get(f"/d/{after}/explore?change=bad").status_code == 404
+
+    r = client.get(f"/diff/{before}/{after}/report.html")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert (
+        "cutover_before_flow_logs-vs-cutover_after_flow_logs.cutover.html"
+        in (r.headers["content-disposition"])
+    )
+    assert "<style>" in r.text and "/static/" not in r.text and "explore?change" not in r.text
+
+    r = client.get(f"/diff/{before}/{sales}")
+    assert r.status_code == 400 and "cannot be compared" in r.text
+    assert client.get(f"/diff/{before}/nope").status_code == 404
+    # Closing a file drops its cached reports.
+    client.post(f"/d/{after}/close")
+    assert registry.diffs == {}
+    assert client.get(f"/diff/{before}/{after}").status_code == 404
