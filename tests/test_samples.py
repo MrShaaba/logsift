@@ -25,10 +25,18 @@ def test_generator_is_deterministic_and_matches_shipped_samples(tmp_path: Path) 
         assert (tmp_path / name).read_bytes() == (ROOT / "samples" / name).read_bytes(), name
 
 
-def test_samples_only_use_documentation_and_private_addresses() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "vpc_flow_logs_custom_v5.log",
+        "cutover_before_flow_logs.log",
+        "cutover_after_flow_logs.log",
+    ],
+)
+def test_samples_only_use_documentation_and_private_addresses(name: str) -> None:
     import re
 
-    text = (ROOT / "samples" / "vpc_flow_logs_custom_v5.log").read_text()
+    text = (ROOT / "samples" / name).read_text()
     ips = set(re.findall(IP_RE, text))
     assert ips and all(ip.startswith(ALLOWED_PREFIXES) for ip in ips)
     assert "123456789012" in text

@@ -52,6 +52,16 @@ Planted problems in the Route 53 Resolver query log (see ``RESOLVER_PLANTED``):
 * an app host moving data over DNS: hundreds of TXT queries with long random labels under
   one domain, and long answers back
 * six minutes of SERVFAIL for the internal zone while the forwarding endpoint was down
+
+The cutover pair (``cutover_before_flow_logs.log`` and ``cutover_after_flow_logs.log``) is
+the same hour of flow logs the day before and the day after a change, for ``logsift diff``
+(see ``CUTOVER_PLANTED``):
+
+* the database security group was replaced and no longer allows the app tier on 5432
+* the web subnet's network ACL lost its ephemeral-port allow, so replies from the second
+  app host on 8080 are rejected while requests still leave
+* the cache moved from 10.0.2.30 to 10.0.2.40, so one destination disappears and a new
+  host appears, and a third app host joined the tier
 """
 
 from __future__ import annotations
@@ -3052,6 +3062,217 @@ def write_resolver(out: Path, rng: random.Random) -> None:
             )
 
 
+# ----------------------------------------------------------------------------
+# A cutover: the same hour of flow logs the day before and the day after a change
+# ----------------------------------------------------------------------------
+
+CUTOVER_BEFORE = datetime(2026, 3, 9, 8, 0, tzinfo=UTC)
+CUTOVER_AFTER = datetime(2026, 3, 11, 8, 0, tzinfo=UTC)
+CUTOVER_HOUR = timedelta(hours=1)
+CACHE_OLD = Host(
+    "10.0.2.30", "eni-0f6a7b8c9d0e10230", "subnet-0b2c3d4e5f6a70002", "i-0f6a7b8c9d0e10230"
+)
+CACHE_NEW = Host(
+    "10.0.2.40", "eni-0f6a7b8c9d0e10240", "subnet-0b2c3d4e5f6a70002", "i-0f6a7b8c9d0e10240"
+)
+APP_NEW = Host(
+    "10.0.2.12", "eni-0b2c3d4e5f6a70203", "subnet-0b2c3d4e5f6a70002", "i-0b2c3d4e5f6a70203"
+)
+CUTOVER_PLANTED = {
+    "sg_now_rejects_5432": {"db": DB.ip, "port": 5432, "clients": [h.ip for h in APP]},
+    "nacl_breaks_8080_replies": {"server": APP[1].ip, "port": 8080, "clients": "10.0.1.0/24"},
+    "cache_moved": {"old": CACHE_OLD.ip, "new": CACHE_NEW.ip, "port": 6379},
+    "new_app_host": {"ip": APP_NEW.ip},
+}
+
+
+def cutover_flows(rng: random.Random, start: datetime, after: bool) -> list[Flow]:
+    """One hour of the fleet's traffic; ``after`` adds the regressions the change caused."""
+    end = start + CUTOVER_HOUR
+
+    def when() -> datetime:
+        return start + timedelta(minutes=rng.randrange(60))
+
+    flows: list[Flow] = []
+    apps = [*APP, APP_NEW] if after else list(APP)
+    cache = CACHE_NEW if after else CACHE_OLD
+    # Public clients browsing the web tier: the same either day.
+    for _ in range(700):
+        flows += tcp_pair(rng, rng.choice(PUBLIC_CLIENTS), rng.choice(WEB), 443, when())
+    # Hosts calling public services and the resolver.
+    for _ in range(120):
+        flows += tcp_pair(rng, rng.choice(ALL_HOSTS), rng.choice(PUBLIC_SERVICES[1:]), 443, when())
+    for _ in range(300):
+        h = rng.choice(ALL_HOSTS)
+        sport = rng.randrange(32768, 61000)
+        t = when()
+        flows.append(
+            Flow(
+                h,
+                h.ip,
+                RESOLVER,
+                sport,
+                53,
+                UDP,
+                2,
+                rng.randrange(120, 300),
+                t,
+                "ACCEPT",
+                "egress",
+                0,
+                "1",
+            )
+        )
+        flows.append(
+            Flow(
+                h,
+                RESOLVER,
+                h.ip,
+                53,
+                sport,
+                UDP,
+                2,
+                rng.randrange(150, 500),
+                t,
+                "ACCEPT",
+                "ingress",
+            )
+        )
+    # The internet knocking on closed ports, the same either day: not new, not interesting.
+    for _ in range(80):
+        web = rng.choice(WEB)
+        flows.append(
+            Flow(
+                web,
+                rng.choice(PUBLIC_CLIENTS),
+                web.ip,
+                rng.randrange(1024, 65000),
+                rng.choice([22, 3389, 23]),
+                TCP,
+                1,
+                44,
+                when(),
+                "REJECT",
+                "ingress",
+                SYN,
+            )
+        )
+    # Web tier to the app tier on 8080.
+    for _ in range(260):
+        web, app = rng.choice(WEB), rng.choice(apps)
+        t = when()
+        if after and app is APP[1]:
+            # The web subnet's NACL lost its ephemeral-port allow: request out, reply refused.
+            sport = rng.randrange(32768, 61000)
+            flows.append(
+                Flow(
+                    web,
+                    web.ip,
+                    app.ip,
+                    sport,
+                    8080,
+                    TCP,
+                    3,
+                    rng.randrange(180, 260),
+                    t,
+                    "ACCEPT",
+                    "egress",
+                    SYN,
+                    "1",
+                )
+            )
+            flows.append(
+                Flow(
+                    web,
+                    app.ip,
+                    web.ip,
+                    8080,
+                    sport,
+                    TCP,
+                    3,
+                    rng.randrange(120, 200),
+                    t,
+                    "REJECT",
+                    "ingress",
+                    SYN | ACK,
+                )
+            )
+            flows.append(
+                Flow(
+                    app,
+                    web.ip,
+                    app.ip,
+                    sport,
+                    8080,
+                    TCP,
+                    3,
+                    rng.randrange(180, 260),
+                    t,
+                    "ACCEPT",
+                    "ingress",
+                    SYN,
+                )
+            )
+            flows.append(
+                Flow(
+                    app,
+                    app.ip,
+                    web.ip,
+                    8080,
+                    sport,
+                    TCP,
+                    3,
+                    rng.randrange(120, 200),
+                    t,
+                    "ACCEPT",
+                    "egress",
+                    SYN | ACK,
+                    "1",
+                )
+            )
+        else:
+            flows += tcp_pair(rng, web, app, 8080, t)
+    # App tier to the database on 5432.
+    for _ in range(180):
+        app = rng.choice(apps)
+        t = when()
+        if after:
+            # The database security group was replaced and no longer allows the app tier.
+            flows.append(
+                Flow(
+                    DB,
+                    app.ip,
+                    DB.ip,
+                    rng.randrange(32768, 61000),
+                    5432,
+                    TCP,
+                    1,
+                    rng.randrange(40, 60),
+                    t,
+                    "REJECT",
+                    "ingress",
+                    SYN,
+                )
+            )
+        else:
+            flows += tcp_pair(rng, app, DB, 5432, t, resp_bytes=(2000, 200000))
+    # App tier to the cache, which moved to a new host in the cutover.
+    for _ in range(220):
+        flows += tcp_pair(rng, rng.choice(apps), cache, 6379, when(), resp_bytes=(200, 8000))
+    return [f for f in flows if start <= f.start < end]
+
+
+def write_cutover(out: Path, rng: random.Random) -> None:
+    for name, start, after in (
+        ("cutover_before_flow_logs.log", CUTOVER_BEFORE, False),
+        ("cutover_after_flow_logs.log", CUTOVER_AFTER, True),
+    ):
+        flows = cutover_flows(rng, start, after)
+        flows.sort(key=lambda f: (f.start, f.eni.eni, f.src, f.dst))
+        lines = [" ".join(CUSTOM_FIELDS)] + [" ".join(f.custom()) for f in flows]
+        (out / name).write_text("\n".join(lines) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--out", default="samples", help="output directory")
@@ -3068,6 +3289,7 @@ def main() -> None:
     write_cloudtrail(out, random.Random(SEED + 4))
     write_s3(out, random.Random(SEED + 5))
     write_resolver(out, random.Random(SEED + 6))
+    write_cutover(out, random.Random(SEED + 7))
     for p in sorted(out.iterdir()):
         print(f"{p.name:40s} {p.stat().st_size / 1024:8.0f} KB")
 

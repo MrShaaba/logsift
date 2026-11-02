@@ -29,6 +29,8 @@ def test_every_sample_is_claimed_by_its_plugin(samples: Path) -> None:
     expect = {
         "vpc_flow_logs_v2.log": ("vpc_flow", "flow"),
         "vpc_flow_logs_custom_v5.log": ("vpc_flow", "flow"),
+        "cutover_before_flow_logs.log": ("vpc_flow", "flow"),
+        "cutover_after_flow_logs.log": ("vpc_flow", "flow"),
         "cloudwatch_insights_export.csv": ("cloudwatch_insights", "flow"),
         "alb_access_logs.log": ("load_balancer", "lb"),
         "nlb_access_logs.log": ("load_balancer", "lb"),
