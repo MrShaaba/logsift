@@ -105,3 +105,22 @@ ul.plain li { padding: 8px 0; border-bottom: 1px solid var(--line); display: fle
 .htmx-request .spinner { display: inline; } .spinner { display: none; color: var(--muted); font-size: 13px; }
 .active-filter { background: var(--accent-soft); color: var(--accent); border-radius: 6px; padding: 6px 10px; display: inline-block; margin-bottom: 10px; font-size: 13.5px; }
 footer { color: var(--muted); font-size: 12.5px; margin-top: 50px; text-align: center; }
+.pinbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0 12px; font-size: 13.5px; }
+.pinbar select, .pinbar input[type=text] { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 13.5px; background: var(--card); }
+form.inline { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+button.linklike { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-size: 13px; }
+button.linklike:hover { text-decoration: underline; }
+.pinned { color: var(--ok); font-size: 13px; }
+td.pin-cell { width: 1%; }
+.inline-title { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.inline-title input { font-size: 22px; font-weight: 600; letter-spacing: -0.3px; padding: 4px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; width: min(100%, 640px); }
+.inline-title input:hover, .inline-title input:focus { border-color: var(--line); background: var(--card); }
+textarea, .pin-note input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 14px; background: var(--card); }
+.pin { position: relative; margin-bottom: 18px; }
+.pin .finding { margin-bottom: 6px !important; }
+.pin-note { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 4px; font-size: 14px; }
+.pin-note textarea { flex: 1; }
+.pin .unpin { text-align: right; margin: 0; }
+tr.note-row td { border-bottom: 1px solid var(--line); background: var(--bg); white-space: normal; }
+tr.note-row form { margin: 0; }
+p.notes { white-space: pre-wrap; }

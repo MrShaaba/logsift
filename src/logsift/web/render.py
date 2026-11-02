@@ -52,6 +52,11 @@ def fmt_size(n: int) -> str:
     return fmt_bytes(n)
 
 
+def fmt_when(epoch: float) -> str:
+    """Seconds since the epoch as a local date and time."""
+    return datetime.fromtimestamp(float(epoch)).strftime("%Y-%m-%d %H:%M")
+
+
 @dataclass
 class Bar:
     x: float
@@ -121,6 +126,7 @@ def make_env() -> Environment:
     env.filters["cell"] = fmt_cell
     env.filters["size"] = fmt_size
     env.filters["num"] = lambda v: f"{v:,}" if isinstance(v, int) else fmt_value(v)
+    env.filters["when"] = fmt_when
     env.globals["timeline_geometry"] = timeline_geometry
     env.globals["histogram_bars"] = histogram_bars
     return env

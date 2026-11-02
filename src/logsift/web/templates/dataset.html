@@ -46,6 +46,8 @@
   <a href="/d/{{ ds.id }}/export/findings.json">JSON</a>
   <a href="/d/{{ ds.id }}/export/findings.xlsx">.xlsx</a>
 </p>
+{% include "_pinbar.html" %}
+{% set pinning = true %}
 {% include "_findings.html" %}
 {% endif %}
 

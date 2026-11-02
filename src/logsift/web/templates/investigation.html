@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}{{ inv.name }}: logsift investigation{% endblock %}
+{% block content %}
+{% if standalone %}
+<h1>{{ inv.name }}</h1>
+<p class="muted">Investigation with {{ inv.findings | length }} pinned findings and {{ inv.rows | length }} pinned rows. Exported {{ generated }} by logsift {{ version }}.</p>
+{% else %}
+<form method="post" action="/investigations/{{ inv.id }}/rename" class="inline-title">
+  <input type="text" name="name" value="{{ inv.name }}" aria-label="Investigation name" required>
+  <button class="btn small secondary" type="submit">Rename</button>
+</form>
+<p class="muted">
+  {{ inv.findings | length }} pinned findings, {{ inv.rows | length }} pinned rows. Started {{ inv.created | when }}, changed {{ inv.updated | when }}.
+  {% if active and active.id == inv.id %}<span class="pill">receives pins</span>{% else %}
+  <form method="post" action="/investigations/active" style="display:inline"><input type="hidden" name="inv" value="{{ inv.id }}"><input type="hidden" name="next" value="/investigations/{{ inv.id }}"><button class="btn small secondary" type="submit">Send new pins here</button></form>
+  {% endif %}
+</p>
+<p class="exports">
+  <a class="btn small secondary" href="/investigations/{{ inv.id }}/report.html">Export as HTML</a>
+  <a class="btn small secondary" href="/investigations">All investigations</a>
+</p>
+{% endif %}
+
+<h2 id="notes">Notes</h2>
+{% if standalone %}
+<div class="card">{% if inv.notes %}<p class="notes" style="margin:0">{{ inv.notes }}</p>{% else %}<p class="muted" style="margin:0">No notes.</p>{% endif %}</div>
+{% else %}
+<form method="post" action="/investigations/{{ inv.id }}/notes" class="card">
+  <textarea name="notes" rows="4" placeholder="What are you looking into? What did you rule out?">{{ inv.notes }}</textarea>
+  <div style="margin-top:8px"><button class="btn small" type="submit">Save notes</button></div>
+</form>
+{% endif %}
+
+{% if not groups %}
+<p class="muted" style="margin-top:20px">Nothing pinned yet. Open a file and use the pin buttons on its findings and rows.</p>
+{% endif %}
+
+{% for g in groups %}
+{% set ds = {"id": g.dataset_id} if g.dataset_id in loaded else none %}
+<h2>{{ g.dataset_name }} {% if not standalone %}<span class="muted" style="font-weight:400;font-size:14px">{% if ds %}<a href="/d/{{ ds.id }}">open</a>{% else %}no longer loaded{% endif %}</span>{% endif %}</h2>
+
+{% for pin in g.findings %}
+<div class="pin" id="pin-{{ pin.id }}">
+  {% set findings = [pin.as_finding()] %}
+  {% set timeline = none %}
+  {% set pinning = false %}
+  {% include "_findings.html" %}
+  {% if standalone %}
+    {% if pin.note %}<div class="pin-note"><b>Note:</b> {{ pin.note }}</div>{% endif %}
+  {% else %}
+  <form method="post" action="/investigations/{{ inv.id }}/pins/{{ pin.id }}/note" class="pin-note">
+    <textarea name="note" rows="2" placeholder="Add a note to this finding">{{ pin.note }}</textarea>
+    <span><button class="btn small secondary" type="submit">Save note</button></span>
+  </form>
+  <form method="post" action="/investigations/{{ inv.id }}/pins/{{ pin.id }}/remove" class="unpin"><button class="btn small danger" type="submit">Unpin</button></form>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if g.rows %}
+{% set columns = g.rows[0].columns %}
+<h3>{{ g.rows | length }} pinned rows</h3>
+<div class="table-wrap">
+<table class="data">
+  <thead><tr><th>row</th>{% for c in columns %}<th>{{ c }}</th>{% endfor %}{% if not standalone %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+  {% for pin in g.rows %}
+    <tr id="pin-{{ pin.id }}">
+      <td class="num">{{ pin.row_no }}</td>
+      {% for c in columns %}{% set i = pin.columns.index(c) if c in pin.columns else none %}<td class="{% if i is not none and pin.values[i] is number %}num{% endif %}">{% if i is not none %}{{ pin.values[i] | cell(c) }}{% endif %}</td>{% endfor %}
+      {% if not standalone %}<td><form method="post" action="/investigations/{{ inv.id }}/pins/{{ pin.id }}/remove"><button class="btn small danger" type="submit">Unpin</button></form></td>{% endif %}
+    </tr>
+    {% if standalone %}
+      {% if pin.note %}<tr class="note-row"><td></td><td colspan="{{ columns | length }}"><b>Note:</b> {{ pin.note }}</td></tr>{% endif %}
+    {% else %}
+    <tr class="note-row"><td></td><td colspan="{{ columns | length + 1 }}">
+      <form method="post" action="/investigations/{{ inv.id }}/pins/{{ pin.id }}/note" class="pin-note">
+        <input type="text" name="note" value="{{ pin.note }}" placeholder="Add a note to this row">
+        <button class="btn small secondary" type="submit">Save note</button>
+      </form>
+    </td></tr>
+    {% endif %}
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endfor %}
+
+{% if not standalone %}
+<details style="margin-top:30px">
+  <summary class="muted">Delete this investigation</summary>
+  <form method="post" action="/investigations/{{ inv.id }}/delete" style="margin-top:8px">
+    <button class="btn small danger" type="submit">Delete "{{ inv.name }}" and its {{ inv.pins | length }} pins</button>
+  </form>
+</details>
+{% endif %}
+{% endblock %}

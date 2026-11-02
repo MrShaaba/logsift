@@ -20,5 +20,7 @@
   <a class="btn secondary" href="/d/{{ ds.id }}/explore">Reset</a>
   <span class="spinner">Loading…</span>
 </form>
+{% include "_pinbar.html" %}
+{% set pinning = true %}
 <div id="rows">{% include "_rows.html" %}</div>
 {% endblock %}

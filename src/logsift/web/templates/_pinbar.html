@@ -1,0 +1,19 @@
+<div class="pinbar">
+  <span class="muted">Pins go to</span>
+  {% if investigations %}
+  <form method="post" action="/investigations/active" class="inline">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <select name="inv" onchange="this.form.submit()" aria-label="Active investigation">
+      {% for i in investigations %}<option value="{{ i.id }}" {% if active and i.id == active.id %}selected{% endif %}>{{ i.name }} ({{ i.pins | length }})</option>{% endfor %}
+    </select>
+  </form>
+  {% if active %}<a class="btn small secondary" href="/investigations/{{ active.id }}">Open</a>{% endif %}
+  {% else %}
+  <span>a new investigation, made on the first pin, or</span>
+  {% endif %}
+  <form method="post" action="/investigations" class="inline">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="text" name="name" placeholder="Name a new investigation" required>
+    <button class="btn small secondary" type="submit">New</button>
+  </form>
+</div>

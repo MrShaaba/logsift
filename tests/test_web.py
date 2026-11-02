@@ -234,3 +234,105 @@ def test_uploads_survive_a_restart_and_close_removes_them(tmp_path: Path, sample
     assert client2.get(url).status_code == 200
     client2.post(f"{url}/close")
     assert not uploads[0].exists() and list((data / "db").glob("*.duckdb")) == []
+
+
+def test_investigations_pin_note_export_and_delete(tmp_path: Path, samples: Path) -> None:
+    app = create_app(data_dir=tmp_path / "data", samples_dir=samples)
+    client = TestClient(app)
+    assert "Nothing yet" in client.get("/investigations").text
+    r = client.post(
+        "/load-sample", data={"name": "vpc_flow_logs_custom_v5.log"}, follow_redirects=False
+    )
+    url = r.headers["location"]
+    page = client.get(url)
+    assert "a new investigation, made on the first pin" in page.text
+    assert "Pin to investigation" in page.text
+
+    # The first pin creates an investigation named after the file.
+    r = client.post(
+        f"{url}/pin",
+        data={"kind": "finding", "finding": "asymmetric"},
+        headers={"HX-Request": "true"},
+    )
+    assert r.status_code == 200
+    assert "Pinned to <a href=" in r.text and "Investigation: vpc_flow_logs_custom_v5.log" in r.text
+    inv = app.state.registry.active()
+    assert inv is not None and len(inv.pins) == 1
+    page = client.get(url)
+    assert f'Pinned to <a href="/investigations/{inv.id}">' in page.text
+    assert "receives pins" not in page.text and f'<option value="{inv.id}" selected>' in page.text
+
+    # Pinning a second finding without HTMX redirects back to the referring page.
+    r = client.post(
+        f"{url}/pin",
+        data={"kind": "finding", "finding": "reject-cluster-1"},
+        headers={"Referer": f"http://testserver{url}#finding-reject-cluster-1"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303 and r.headers["location"].endswith("#finding-reject-cluster-1")
+    # Rows get a pin column; pinning one marks it.
+    rows = client.get(f"{url}/rows?finding=reject-cluster-1")
+    assert 'hx-vals=\'{"kind": "row", "row_no": ' in rows.text
+    row_no = int(rows.text.split('"row_no": ')[1].split("}")[0])
+    r = client.post(
+        f"{url}/pin", data={"kind": "row", "row_no": row_no}, headers={"HX-Request": "true"}
+    )
+    assert r.status_code == 200 and "Pinned to" in r.text
+    rows = client.get(f"{url}/rows?finding=reject-cluster-1")
+    assert 'title="Pinned to Investigation: vpc_flow_logs_custom_v5.log">Pinned' in rows.text
+    assert client.post(f"{url}/pin", data={"kind": "row", "row_no": 10**9}).status_code == 404
+    assert client.post(f"{url}/pin", data={"kind": "finding", "finding": "zzz"}).status_code == 404
+    assert client.post(f"{url}/pin", data={"kind": "what"}).status_code == 400
+
+    # The investigation page: pinned finding card with its query, the row, notes.
+    inv_url = f"/investigations/{inv.id}"
+    page = client.get(inv_url)
+    assert page.status_code == 200
+    assert "Return traffic blocked" in page.text and "TCP port 5432 to 10.0.3.20" in page.text
+    assert "CloudWatch Logs Insights query" in page.text
+    assert "1 pinned rows" in page.text and f'<a href="{url}">open</a>' in page.text
+    assert "Show the 1,280 rows behind this finding" in page.text  # the file is still loaded
+    pin = inv.pins[0]
+    r = client.post(f"{inv_url}/pins/{pin.id}/note", data={"note": "NACL change at 08:55"})
+    assert r.status_code == 200 and "NACL change at 08:55" in r.text
+    r = client.post(f"{inv_url}/notes", data={"notes": "Opened after the deploy."})
+    assert "Opened after the deploy." in r.text
+    r = client.post(f"{inv_url}/rename", data={"name": "Blocked replies"})
+    assert 'value="Blocked replies"' in r.text
+    assert client.post(f"{inv_url}/pins/nope/note", data={"note": "x"}).status_code == 404
+    listing = client.get("/investigations").text
+    assert "Blocked replies" in listing and "2 findings, 1 rows" in listing
+    assert "receives pins" in listing
+
+    # The export is one self-contained page with the notes and pins, and no forms.
+    r = client.get(f"{inv_url}/report.html")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert "Blocked replies.investigation.html" in r.headers["content-disposition"]
+    assert "<style>" in r.text and "/static/" not in r.text and "<form" not in r.text
+    assert "Opened after the deploy." in r.text and "NACL change at 08:55" in r.text
+    assert "Return traffic blocked" in r.text and "1 pinned rows" in r.text
+    assert "1,280 rows behind this finding" in r.text and "Show the" not in r.text
+
+    # Closing the file keeps the snapshot; unpinning and deleting work.
+    client.post(f"{url}/close")
+    page = client.get(inv_url)
+    assert "no longer loaded" in page.text and "Return traffic blocked" in page.text
+    r = client.post(f"{inv_url}/pins/{pin.id}/remove")
+    assert r.status_code == 200 and "Return traffic blocked" not in r.text
+    assert client.post(f"{inv_url}/pins/{pin.id}/remove").status_code == 404
+    # A second investigation can be made the target for new pins.
+    r = client.post("/investigations", data={"name": "Second", "next": "/"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    second = app.state.registry.active()
+    assert second is not None and second.name == "Second"
+    r = client.post(
+        "/investigations/active", data={"inv": inv.id, "next": inv_url}, follow_redirects=False
+    )
+    assert r.headers["location"] == inv_url and app.state.registry.active_id == inv.id
+    assert client.post("/investigations/active", data={"inv": "nope"}).status_code == 404
+    r = client.post(f"{inv_url}/delete", follow_redirects=False)
+    assert r.status_code == 303 and client.get(inv_url).status_code == 404
+    assert [i.name for i in app.state.registry.investigations.list()] == ["Second"]
+    # The store survives a restart.
+    again = TestClient(create_app(data_dir=tmp_path / "data", samples_dir=samples))
+    assert "Second" in again.get("/investigations").text

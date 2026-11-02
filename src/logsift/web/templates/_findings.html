@@ -22,8 +22,11 @@
   {% if f.likely_cause %}<div class="cause"><b>Likely cause:</b> {{ f.likely_cause }}</div>{% endif %}
   <p class="meta" style="margin:8px 0 0">
     {% if f.row_count %}
-      {% if standalone %}{{ f.row_count | num }} rows behind this finding{% else %}<a href="/d/{{ ds.id }}/explore?finding={{ f.id }}">Show the {{ f.row_count | num }} rows behind this finding</a>{% endif %}
+      {% if standalone or not ds %}{{ f.row_count | num }} rows behind this finding{% else %}<a href="/d/{{ ds.id }}/explore?finding={{ f.id }}">Show the {{ f.row_count | num }} rows behind this finding</a>{% endif %}
     {% else %}No rows to show{% endif %}
+    {% if pinning %}
+      · {% if f.id in pinned_findings %}<span class="pinned">Pinned to <a href="/investigations/{{ active.id }}">{{ active.name }}</a></span>{% else %}<form class="inline" method="post" action="/d/{{ ds.id }}/pin" hx-post="/d/{{ ds.id }}/pin" hx-swap="outerHTML"><input type="hidden" name="kind" value="finding"><input type="hidden" name="finding" value="{{ f.id }}"><button class="linklike" type="submit">Pin to investigation</button></form>{% endif %}
+    {% endif %}
   </p>
   {% for t in f.tables %}
   <details {% if loop.first and f.severity in ('high', 'medium') %}open{% endif %}>

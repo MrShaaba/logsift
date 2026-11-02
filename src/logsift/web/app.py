@@ -22,6 +22,8 @@ from logsift.export import (
     rows_to_json,
     rows_to_xlsx,
 )
+from logsift.investigations import Investigation, InvestigationStore, Pin
+from logsift.report import render_investigation
 from logsift.store import Store
 from logsift.web.render import make_env
 
@@ -40,6 +42,27 @@ class Registry:
         self.datasets: dict[str, Dataset] = {}
         for ds in Dataset.restore_all(self.store):
             self.datasets[ds.id] = ds
+        self.investigations = InvestigationStore(data_dir / "investigations")
+        # Pins go to the active investigation; the most recently changed one until chosen.
+        self.active_id: str | None = None
+
+    def active(self) -> Investigation | None:
+        if self.active_id:
+            inv = self.investigations.get(self.active_id)
+            if inv is not None:
+                return inv
+            self.active_id = None
+        found = self.investigations.list()
+        if found:
+            self.active_id = found[0].id
+            return found[0]
+        return None
+
+    def investigation(self, inv_id: str) -> Investigation:
+        inv = self.investigations.get(inv_id)
+        if inv is None:
+            raise HTTPException(404, "No such investigation.")
+        return inv
 
     def open(self, path: Path, name: str | None = None) -> Dataset:
         """Load the first ``sample_rows`` rows of a file and keep it."""
@@ -190,6 +213,16 @@ def create_app(
             page.headers["HX-Refresh"] = "true"
         return page
 
+    def pin_context(ds: Dataset, next_url: str) -> dict[str, object]:
+        active = registry.active()
+        return {
+            "active": active,
+            "investigations": registry.investigations.list(),
+            "pinned_findings": active.pinned_findings(ds.id) if active else set(),
+            "pinned_rows": active.pinned_rows(ds.id) if active else set(),
+            "next_url": next_url,
+        }
+
     @app.get("/d/{ds_id}", response_class=HTMLResponse)
     def overview(ds_id: str) -> HTMLResponse:
         ds = registry.get(ds_id)
@@ -200,6 +233,7 @@ def create_app(
             profile=ds.profile,
             findings=ds.findings,
             timeline=ds.timeline,
+            **pin_context(ds, f"/d/{ds.id}"),
         )
 
     @app.get("/d/{ds_id}/explore", response_class=HTMLResponse)
@@ -220,6 +254,7 @@ def create_app(
             sort=rq.order_by,
             desc=rq.descending,
             export_limit=MAX_EXPORT_ROWS,
+            **pin_context(ds, f"/d/{ds.id}/explore?{urlencode(keep)}"),
         )
 
     @app.get("/d/{ds_id}/rows", response_class=HTMLResponse)
@@ -230,12 +265,141 @@ def create_app(
         return render(
             "_rows.html",
             ds=ds,
+            pinning=True,
             page=pg,
             qs=urlencode(keep),
             sort=rq.order_by,
             desc=rq.descending,
             export_limit=MAX_EXPORT_ROWS,
+            **pin_context(ds, f"/d/{ds.id}/explore?{urlencode(keep)}"),
         )
+
+    # ------------------------------------------------------------ investigations
+
+    def back(request: Request, fallback: str) -> RedirectResponse:
+        target = request.headers.get("referer") or fallback
+        return RedirectResponse(target, status_code=303)
+
+    @app.get("/investigations", response_class=HTMLResponse)
+    def investigations() -> HTMLResponse:
+        return render(
+            "investigations.html",
+            nav="investigations",
+            investigations=registry.investigations.list(),
+            active=registry.active(),
+            store_dir=str(registry.investigations.root),
+        )
+
+    @app.post("/investigations")
+    def create_investigation(
+        request: Request, name: str = Form(""), next: str = Form("")
+    ) -> RedirectResponse:
+        inv = registry.investigations.create(name)
+        registry.active_id = inv.id
+        return RedirectResponse(next or f"/investigations/{inv.id}", status_code=303)
+
+    @app.post("/investigations/active")
+    def choose_investigation(inv: str = Form(...), next: str = Form("/")) -> RedirectResponse:
+        registry.investigation(inv)
+        registry.active_id = inv
+        return RedirectResponse(next or "/", status_code=303)
+
+    @app.get("/investigations/{inv_id}", response_class=HTMLResponse)
+    def investigation(inv_id: str) -> HTMLResponse:
+        inv = registry.investigation(inv_id)
+        return render(
+            "investigation.html",
+            nav="investigations",
+            inv=inv,
+            groups=inv.by_dataset(),
+            loaded={ds_id for ds_id in registry.datasets},
+            active=registry.active(),
+        )
+
+    @app.get("/investigations/{inv_id}/report.html")
+    def investigation_report(inv_id: str) -> Response:
+        inv = registry.investigation(inv_id)
+        safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in inv.name).strip() or inv.id
+        return Response(
+            render_investigation(inv),
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{safe}.investigation.html"'},
+        )
+
+    @app.post("/investigations/{inv_id}/rename")
+    def rename_investigation(inv_id: str, name: str = Form(...)) -> RedirectResponse:
+        inv = registry.investigation(inv_id)
+        inv.name = name.strip() or inv.name
+        inv.touch()
+        registry.investigations.save(inv)
+        return RedirectResponse(f"/investigations/{inv.id}", status_code=303)
+
+    @app.post("/investigations/{inv_id}/notes")
+    def investigation_notes(inv_id: str, notes: str = Form("")) -> RedirectResponse:
+        inv = registry.investigation(inv_id)
+        inv.notes = notes.strip()
+        inv.touch()
+        registry.investigations.save(inv)
+        return RedirectResponse(f"/investigations/{inv.id}#notes", status_code=303)
+
+    @app.post("/investigations/{inv_id}/delete")
+    def delete_investigation(inv_id: str) -> RedirectResponse:
+        registry.investigation(inv_id)
+        registry.investigations.delete(inv_id)
+        if registry.active_id == inv_id:
+            registry.active_id = None
+        return RedirectResponse("/investigations", status_code=303)
+
+    @app.post("/investigations/{inv_id}/pins/{pin_id}/note")
+    def pin_note(inv_id: str, pin_id: str, note: str = Form("")) -> RedirectResponse:
+        inv = registry.investigation(inv_id)
+        pin = inv.pin(pin_id)
+        if pin is None:
+            raise HTTPException(404, "No such pin.")
+        pin.note = note.strip()
+        inv.touch()
+        registry.investigations.save(inv)
+        return RedirectResponse(f"/investigations/{inv.id}#pin-{pin.id}", status_code=303)
+
+    @app.post("/investigations/{inv_id}/pins/{pin_id}/remove")
+    def pin_remove(inv_id: str, pin_id: str) -> RedirectResponse:
+        inv = registry.investigation(inv_id)
+        if not inv.remove(pin_id):
+            raise HTTPException(404, "No such pin.")
+        registry.investigations.save(inv)
+        return RedirectResponse(f"/investigations/{inv.id}", status_code=303)
+
+    @app.post("/d/{ds_id}/pin", response_class=HTMLResponse)
+    def pin(
+        ds_id: str,
+        request: Request,
+        kind: str = Form(...),
+        finding: str = Form(""),
+        row_no: int | None = Form(None),
+    ) -> Response:
+        """Pin a finding or a row to the active investigation, creating one if none exists."""
+        ds = registry.get(ds_id)
+        inv = registry.active()
+        if inv is None:
+            inv = registry.investigations.create(f"Investigation: {ds.name}")
+            registry.active_id = inv.id
+        if kind == "finding":
+            f = ds.finding(finding)
+            if f is None:
+                raise HTTPException(404, "Unknown finding.")
+            new_pin = Pin.of_finding(ds, f)
+        elif kind == "row" and row_no is not None:
+            maybe = Pin.of_row(ds, row_no)
+            if maybe is None:
+                raise HTTPException(404, "No such row.")
+            new_pin = maybe
+        else:
+            raise HTTPException(400, "Pin a finding or a row.")
+        pinned = inv.add(new_pin)
+        registry.investigations.save(inv)
+        if request.headers.get("hx-request"):
+            return render("_pinned.html", inv=inv, pin=pinned)
+        return back(request, f"/d/{ds.id}")
 
     @app.get("/d/{ds_id}/export/findings.{fmt}")
     def export_findings(ds_id: str, fmt: str) -> Response:

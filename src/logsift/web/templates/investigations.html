@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Investigations: logsift{% endblock %}
+{% block content %}
+<h1>Investigations</h1>
+<p class="muted">Pin findings and rows from any loaded file, add notes, and export the lot as one HTML page. Saved as JSON under <code>{{ store_dir }}</code>.</p>
+
+<form method="post" action="/investigations" class="filters" style="margin-top:14px">
+  <label>New investigation <input type="text" name="name" placeholder="e.g. Blocked database traffic" required></label>
+  <button class="btn" type="submit">Create</button>
+</form>
+
+{% if investigations %}
+<div class="card">
+  <ul class="plain">
+  {% for i in investigations %}
+    <li>
+      <span>
+        <a href="/investigations/{{ i.id }}"><strong>{{ i.name }}</strong></a>
+        <span class="muted">{{ i.findings | length }} findings, {{ i.rows | length }} rows, changed {{ i.updated | when }}</span>
+        {% if active and i.id == active.id %}<span class="pill">receives pins</span>{% endif %}
+      </span>
+      <span>
+        <a class="btn small secondary" href="/investigations/{{ i.id }}">Open</a>
+        <a class="btn small secondary" href="/investigations/{{ i.id }}/report.html">Export HTML</a>
+      </span>
+    </li>
+  {% endfor %}
+  </ul>
+</div>
+{% else %}
+<p class="muted">Nothing yet. Open a file and use the pin buttons on its findings and rows.</p>
+{% endif %}
+{% endblock %}

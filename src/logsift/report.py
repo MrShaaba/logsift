@@ -10,6 +10,7 @@ from typing import Any
 from logsift import __version__
 from logsift.dataset import Dataset
 from logsift.explore import RowQuery, fetch_page
+from logsift.investigations import Investigation
 from logsift.web.render import make_env, static_text
 
 ROWS_PER_FINDING = 25
@@ -55,4 +56,23 @@ def write_report(
         ds.close()
     out = out or path.with_suffix("").with_name(path.stem + ".report.html")
     out.write_text(html, encoding="utf-8")
+    return out
+
+
+def render_investigation(inv: Investigation) -> str:
+    """A self-contained HTML page for an investigation: its notes, pinned findings and rows."""
+    env = make_env()
+    return env.get_template("investigation.html").render(
+        standalone=True,
+        css=static_text("app.css"),
+        inv=inv,
+        groups=inv.by_dataset(),
+        loaded=set(),
+        generated=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+        version=__version__,
+    )
+
+
+def write_investigation_report(inv: Investigation, out: Path) -> Path:
+    out.write_text(render_investigation(inv), encoding="utf-8")
     return out

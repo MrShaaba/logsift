@@ -4,16 +4,18 @@
   <a href="/d/{{ ds.id }}/export/rows.json?{{ qs }}">JSON</a>
   <a href="/d/{{ ds.id }}/export/rows.xlsx?{{ qs }}">.xlsx</a>
 </p>
+{% set pin_rows = pinning and 'row_no' in page.columns %}
 <div class="table-wrap">
 <table class="data">
   <thead><tr>
+  {% if pin_rows %}<th></th>{% endif %}
   {% for c in page.columns %}{% if c != 'row_no' %}
     <th><a href="#" hx-get="{{ base }}&sort={{ c }}&desc={{ 0 if sort == c and desc else 1 }}" hx-target="#rows">{{ c }}{% if sort == c %} {{ '▼' if desc else '▲' }}{% endif %}</a></th>
   {% endif %}{% endfor %}
   </tr></thead>
   <tbody>
   {% for r in page.rows %}
-    <tr>{% for v in r %}{% if page.columns[loop.index0] != 'row_no' %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(page.columns[loop.index0]) }}</td>{% endif %}{% endfor %}</tr>
+    <tr>{% if pin_rows %}{% set n = r[page.columns.index('row_no')] %}<td class="pin-cell">{% if n in pinned_rows %}<span class="pinned" title="Pinned to {{ active.name }}">Pinned</span>{% else %}<button class="linklike" type="button" hx-post="/d/{{ ds.id }}/pin" hx-vals='{"kind": "row", "row_no": {{ n }}}' hx-swap="outerHTML" title="Pin this row to {{ active.name if active else 'a new investigation' }}">Pin</button>{% endif %}</td>{% endif %}{% for v in r %}{% if page.columns[loop.index0] != 'row_no' %}<td class="{% if v is number %}num{% endif %}">{{ v | cell(page.columns[loop.index0]) }}</td>{% endif %}{% endfor %}</tr>
   {% else %}
     <tr><td colspan="{{ page.columns | length }}" class="muted">No rows match.</td></tr>
   {% endfor %}

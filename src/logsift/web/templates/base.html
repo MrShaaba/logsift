@@ -17,6 +17,7 @@
   {% if not standalone %}
   <nav>
     <a href="/" class="{% if nav == 'home' %}active{% endif %}">Files</a>
+    <a href="/investigations" class="{% if nav == 'investigations' %}active{% endif %}">Investigations</a>
     {% if ds %}
     <a href="/d/{{ ds.id }}" class="{% if nav == 'overview' %}active{% endif %}">Overview</a>
     <a href="/d/{{ ds.id }}/explore" class="{% if nav == 'explore' %}active{% endif %}">Explore</a>
