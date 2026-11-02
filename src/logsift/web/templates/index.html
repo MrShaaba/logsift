@@ -2,7 +2,7 @@
 {% block title %}logsift: drop in a file{% endblock %}
 {% block content %}
 <h1>Drop in a CSV or log file and understand it right away</h1>
-<p class="muted">Comma, tab, semicolon, pipe or space delimited, quoted fields, a byte order mark and gzip are all fine. VPC Flow Logs, CloudWatch Logs Insights exports, ALB and NLB access logs, CloudTrail event exports, S3 server access logs and Route 53 Resolver query logs get rule-based findings.</p>
+<p class="muted">Comma, tab, semicolon, pipe or space delimited, quoted fields, a byte order mark and gzip are all fine. VPC Flow Logs, CloudWatch Logs Insights exports, ALB and NLB access logs, CloudTrail event exports, S3 server access logs and Route 53 Resolver query logs get rule-based findings, and two files of one format compare as a cutover report.</p>
 
 <form id="upload" class="dropzone" action="/upload" method="post" enctype="multipart/form-data">
   <input type="file" name="file" id="file" accept=".csv,.tsv,.txt,.log,.gz,.psv">

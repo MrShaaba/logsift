@@ -1,35 +1,53 @@
 # logsift
 
-Drop in a CSV or log file and understand it right away.
+AWS log investigation and cutover validation, on your own machine.
 
-logsift is a small local tool for the moment you open an unfamiliar CSV or log export and
-lose time working out what the columns mean and where the interesting rows are. You drop a
-file in and get a plain-English read of it: what the file is, what each column holds, and,
-for AWS VPC Flow Logs, load balancer access logs, CloudTrail exports, S3 server access logs
-and Route 53 Resolver query logs, where traffic is breaking and what looks unusual. Every
-finding comes with the CloudWatch Logs Insights query that finds the same rows in the live
-log group, and findings and rows can be pinned to an investigation with notes and exported
-as one HTML page.
+logsift reads the log exports AWS hands you (VPC Flow Logs, ALB and NLB access logs,
+CloudTrail events, S3 server access logs, Route 53 Resolver query logs, or any CSV) and
+does two jobs with them:
 
-![logsift showing findings for a VPC Flow Log](docs/screenshot.png)
+- **Investigate one file.** Drop it in and get a plain-English read: what the file is,
+  what each column holds, and where traffic is breaking or something looks wrong, as
+  rule-based findings with a severity, an explanation, the likely cause, the rows behind
+  it and the CloudWatch Logs Insights query that finds the same rows in the live log
+  group. Pin findings and rows to an investigation, add notes, export one HTML page.
+- **Validate a cutover.** Give it the same log from before and after a change (a
+  migration, a security group or NACL rewrite, a new release, a DNS move) and
+  `logsift diff` aligns the two on time, runs the format's checks and returns a verdict:
+  **clean**, **review** or **regression**, with the evidence rows for each change. New
+  rejected flows, lost return paths, traffic that disappeared, new talkers, 5xx per
+  target, new NXDOMAIN or SERVFAIL, principals newly refused an action.
+
+![the cutover report for a before and after flow log](docs/screenshot-cutover.png)
+
+Everything runs locally. Nothing is uploaded, there is no telemetry, no accounts and no
+cloud resources. Findings are rules, not models.
 
 ## Who it is for
 
 Engineers who get handed a flow log export, a load balancer access log, a CloudTrail
-download, an S3 access log, a CloudWatch Logs Insights CSV or a random data dump and want
-answers before writing a single query. The cases it cares about most are VPC Flow Logs
-(rejected flows, one-way flows, a blocked return path, a port sweep, a noisy host, gaps in
-the capture), ALB and NLB access logs (a target failing behind a passing health check, a
-burst of 5xx, a slow endpoint, rejected TLS handshakes), CloudTrail event exports (a key
-being tested against every action it might have, console sign-ins without MFA, root
-activity, instances appearing in a region nobody uses) and S3 server access logs (a public
-prefix being read anonymously, a stranger guessing file names, 404s piling up under one
-prefix after a cleanup, a batch role refused on a schedule) and Route 53 Resolver query
-logs (a host generating names, DNS Firewall blocks, data moving over DNS, an internal zone
-failing to resolve).
+download, an S3 access log, a Resolver query log or a CloudWatch Logs Insights CSV and
+want answers before writing a single query. And the same engineers on cutover day, when
+the question is not "what is in this file" but "did the change break anything": the
+diff of yesterday's hour against today's is the check that takes minutes by hand and
+gets skipped.
+
+The single-file cases it cares about most are VPC Flow Logs (rejected flows, one-way
+flows, a blocked return path, a port sweep, a noisy host, gaps in the capture), ALB and
+NLB access logs (a target failing behind a passing health check, a burst of 5xx, a slow
+endpoint, rejected TLS handshakes), CloudTrail event exports (a key being tested against
+every action it might have, console sign-ins without MFA, root activity, instances
+appearing in a region nobody uses), S3 server access logs (a public prefix being read
+anonymously, a stranger guessing file names, 404s piling up under one prefix after a
+cleanup, a batch role refused on a schedule) and Route 53 Resolver query logs (a host
+generating names, DNS Firewall blocks, data moving over DNS, an internal zone failing to
+resolve).
 
 ## What it does
 
+- **Compares a before and an after file** of one format as a cutover report, in the web
+  UI, on the command line (`logsift diff`, with `--fail-on regression` as a pipeline
+  gate) and as a self-contained HTML page. See [Cutover validation](#cutover-validation).
 - **Loads** comma, tab, semicolon, pipe and space-delimited files, with quoted fields, a
   byte order mark and gzip, and JSON-lines files (one object per line). Shows row and
   column counts and any parse warnings.
@@ -131,6 +149,8 @@ failing to resolve).
 - **Writes a self-contained HTML report** from the command line, for a file or for an
   investigation.
 
+![logsift showing findings for a VPC Flow Log](docs/screenshot.png)
+
 ![logsift showing findings for an ALB access log](docs/screenshot-alb.png)
 
 ![logsift showing findings for a CloudTrail export](docs/screenshot-cloudtrail.png)
@@ -140,9 +160,6 @@ failing to resolve).
 ![logsift showing findings for a Route 53 Resolver query log](docs/screenshot-route53.png)
 
 ![an investigation with a pinned finding, a pinned row and notes](docs/screenshot-investigation.png)
-
-Everything runs locally. Nothing is uploaded, there is no telemetry, no accounts and no
-cloud resources. Findings are rules, not models.
 
 ## Stack
 
@@ -159,6 +176,7 @@ uv run logsift serve --open          # web UI at http://127.0.0.1:8000
 uv run logsift serve samples/vpc_flow_logs_custom_v5.log   # start with a file loaded
 uv run logsift report samples/vpc_flow_logs_v2.log         # writes samples/vpc_flow_logs_v2.report.html
 uv run logsift inspect samples/cloudtrail_events.csv -v    # summary and findings in the terminal
+uv run logsift diff samples/cutover_before_flow_logs.log samples/cutover_after_flow_logs.log -o cutover.html
 uv run logsift inspect samples/s3_access_logs.log --queries  # with the Logs Insights query per finding
 uv run logsift investigations                              # list the saved investigations
 uv run logsift report --investigation "Blocked replies"    # export one as HTML
@@ -171,6 +189,50 @@ the files in `samples/` so you can open one with a click.
 
 No configuration is needed. `.env.example` lists the optional host, port, data directory
 and sample-size overrides for `logsift serve`.
+
+## Cutover validation
+
+`logsift diff BEFORE AFTER` takes two files of one format and answers "what changed, and
+is it a regression". In the web UI, load both files and use "Compare two files" on the
+home page; the report page has the same content with links from every change into the
+explorer, and an "Export as HTML" button for the standalone page. On the command line:
+
+```bash
+uv run logsift diff before.log after.log                 # verdict and one line per change
+uv run logsift diff before.log after.log -v -o out.html  # summaries, plus the HTML report
+uv run logsift diff before.log after.log --json          # the report as JSON
+uv run logsift diff before.log after.log --fail-on regression   # exit 1 on a regression
+```
+
+**Alignment.** The two files rarely cover the same wall-clock time (yesterday's hour
+against today's), so each is cut to the same number of minutes from its own first record,
+whichever file is shorter, and everything is compared over those two windows: counts,
+shares, and a before/after timeline on a "minutes since start" axis. The report says
+which file was trimmed.
+
+**Checks.** Every format gets a volume check (rows per minute) and a bad-share check
+(rejected, 5xx, failed or blocked, errors), then its own:
+
+| Format | Checks |
+| --- | --- |
+| VPC Flow Logs | new rejected traffic per destination and port (a regression when that destination accepted the traffic before), lost return paths (request accepted, reply rejected, for pairs that worked before), destinations whose traffic disappeared, new talkers |
+| ALB | 5xx share per target and per path, targets gone or new, p95 target processing time |
+| NLB | failed TLS handshakes per destination, destinations gone or new |
+| Route 53 Resolver | domains newly failing (any SERVFAIL run is a regression), DNS Firewall blocks that are new, domains that disappeared, new clients |
+| CloudTrail | principal and action pairs newly refused (a regression when the pair was allowed before), error share per service, principals gone or new, new regions |
+
+**Verdicts.** A check is a **regression** when traffic that worked before fails after
+(the destination accepted the flows, the pair completed its exchanges, the principal was
+allowed the action) or a bad share doubles with at least twenty bad rows behind it; a
+**review** when something changed that may be intended (a destination gone, a new host,
+a share up by a quarter); **clean** otherwise, and the report says so for each check so
+silence is never mistaken for success. The report's verdict is the worst of its changes.
+Each change carries its counts before and after, a table of the keys involved, and the
+first rows behind it from whichever file holds the evidence; the JSON output has the
+same.
+
+The sample pair `cutover_before_flow_logs.log` and `cutover_after_flow_logs.log` has
+three regressions and two reviews planted in it (see [Sample data](#sample-data)).
 
 ## Large files
 
@@ -268,7 +330,8 @@ yet.
 `samples/` holds fictional files produced by `scripts/generate_samples.py` (seeded, so the
 output is reproducible). The flow logs, load balancer logs, CloudTrail export, S3 access
 log and Resolver query log cover the same two hour window and have known problems planted
-in them:
+in them, and the cutover pair is the same hour of flow logs the day before and the day
+after a change:
 
 | Problem | Where to look |
 | --- | --- |
@@ -299,6 +362,9 @@ in them:
 | `10.0.1.11` asking for `c2.bad.example` and friends every twenty seconds, all day, blocked by DNS Firewall | "DNS Firewall blocked 342 queries for 3 names under bad.example" |
 | `10.0.2.10` moving data in 700 TXT queries with 48-character labels under `dns.example.net` | "Possible DNS tunnel" |
 | Six minutes of SERVFAIL for `corp.example.internal` while the outbound endpoint was down | "SERVFAIL for 68 queries under example.internal over 6 minutes" |
+| Cutover: the database security group replaced, refusing the app tier on `5432` | `logsift diff`: "New rejected traffic: 180 flows to 1 destination that were not rejected before" (regression) |
+| Cutover: the web subnet's NACL lost its ephemeral-port allow, so replies from `10.0.2.11:8080` are rejected | "Lost return path: replies to 86 requests are now rejected" (regression) |
+| Cutover: the cache moved from `10.0.2.30` to `10.0.2.40` and a third app host joined | "Traffic that disappeared" and "New talkers" (review) |
 
 Addresses come from the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
 203.0.113.0/24) and private 10.x space, and the account is the example `123456789012`.
@@ -329,6 +395,9 @@ Layout:
 src/logsift/
   loader.py         delimiter, header and JSON-lines sniffing, chunked typed loading into
                     DuckDB with progress and a resumable row limit, parse warnings
+  diff.py           the cutover diff: align two files, run the checks, the report
+  cutover.py        Change, Verdict, Alignment and the DiffContext the checks run over
+  cutover_checks.py building blocks for format checks (share changes, keys gone or new)
   store.py          one DuckDB file and one JSON sidecar per loaded dataset under data/db/
   formats/          one plug-in per format
     base.py         Format, FormatInfo and the FormatPlugin interface
@@ -340,7 +409,7 @@ src/logsift/
     s3access/       S3 server access logs
     route53resolver/ Route 53 Resolver query logs, JSON lines and CSV
                     each with __init__.py (detector and QuerySpec), table.py (typed table),
-                    findings.py (rules)
+                    findings.py (rules) and cutover.py (before/after checks)
   insights/base.py  Finding, Severity and Table, and the text helpers the rules share
   insights/cwlogs.py the SQL-to-Logs-Insights translator and QuerySpec
   investigations.py pins, notes and the JSON store under data/investigations/
@@ -350,9 +419,9 @@ src/logsift/
   profile.py        per-column profile and the plain-English summary
   explore.py        paginated search and filter queries
   export.py         CSV, JSON and .xlsx writers
-  report.py         self-contained HTML report, for a file or an investigation
+  report.py         self-contained HTML report, for a file, an investigation or a cutover
   web/              FastAPI app, Jinja2 templates, vendored HTMX and CSS
-  cli.py            logsift serve | report | inspect | investigations
+  cli.py            logsift serve | report | inspect | diff | investigations
 scripts/generate_samples.py        the fictional samples, seeded
 scripts/generate_big_flow_log.py   a multi-million-row flow log on demand, seeded, never committed
 samples/
@@ -375,6 +444,10 @@ behind one small interface, `FormatPlugin` in `formats/base.py`:
 - `query_spec(fmt)` (optional) returns a `QuerySpec` naming the CloudWatch field for each
   column, so every finding gets its Logs Insights query for free; leave it out for a
   format that never reaches CloudWatch.
+- `time_column`, `health(columns)` and `cutover_checks(ctx)` (optional) make the format
+  diffable: the column two files are aligned on, what a bad row is (for the volume and
+  bad-share checks and the timeline), and the format's own before/after checks over a
+  `DiffContext` holding both tables as `b` and `a`.
 
 Set `name`, `table` and `dash_means_missing` on the class, register an instance in
 `PLUGINS` in `formats/__init__.py`, and that is all: `Dataset` finds the plug-in by name.

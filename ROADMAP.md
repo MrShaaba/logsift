@@ -98,12 +98,75 @@ are done; everything else is not started.
 - [ ] A deep link that pre-fills the CloudWatch console with the query, the log group and
       the time range
 
-## Diffing two files
+## Diffing two files: the cutover validator
 
-- [ ] Load a "before" and an "after" file side by side
-- [ ] Diff the profiles (new columns, changed types, shifted distributions)
-- [ ] Diff the findings (resolved, new, changed counts) to confirm a NACL or security group
-      change did what it should
+- [x] Load a "before" and an "after" file side by side. `logsift diff`, the "Compare two
+      files" form on the home page, and `/diff/{before}/{after}`; the two files are cut to
+      the same number of minutes from each one's first record. Not covered yet: choosing
+      the windows by hand (compare 09:00-10:00 of each rather than the first N minutes),
+      more than two files (a baseline of several days against today), and a diff against
+      a saved baseline rather than a second file
+- [x] Diff the findings to confirm a NACL or security group change did what it should.
+      Done as per-format cutover checks with a verdict each (clean, review, regression) and
+      evidence rows: flow logs (new rejected traffic, lost return paths, traffic that
+      disappeared, new talkers), ALB and NLB (5xx per target and path, handshakes,
+      targets gone or new, p95), Resolver (new failures, new blocks, names gone, new
+      clients) and CloudTrail (new denials, errors per service, principals, regions). Not
+      covered yet: S3 access logs, a "resolved" list (problems in the before file that the
+      after file no longer has, shown as improvements rather than only as clean checks),
+      and thresholds a user can tune per check
+- [ ] Diff the profiles (new columns, changed types, shifted distributions), for files of
+      any format including generic CSV
+
+## Next
+
+Concrete next items, roughly sized; about thirty-four hours in all, a working week.
+
+- [ ] **NAT and data-transfer cost estimator from flow logs** (6 h). From a custom-format
+      flow log with `pkt-srcaddr`, `pkt-dstaddr`, `traffic-path`, `az-id` and
+      `flow-direction`: bytes through a NAT gateway (flows whose packet address differs
+      from the flow address on the NAT's ENI, or `traffic-path` through an internet
+      gateway from a private subnet), cross-AZ bytes (source and destination in different
+      `az-id`s), internet egress (`traffic-path` 2 or 8, egress direction) and bytes to
+      gateway and interface endpoints (`traffic-path` 3 and 7). Multiply by per-GB prices
+      the user supplies in a small config (no built-in price list, prices change and
+      differ by region), and show the top talkers behind each bucket so the finding is
+      "10.0.1.12 pushes 40 GB a day through the NAT to an S3 endpoint it could reach via a
+      gateway endpoint for nothing". Needs the sample generator to plant a NAT ENI and a
+      cross-AZ pair, and a `logsift cost` command plus a card on the flow overview.
+- [ ] **Hand-picked windows for the diff** (2 h). `--before-window` and `--after-window`
+      as `start/end` pairs, and two time pickers on the diff page, so a known deploy
+      moment can be compared against the same hour the day before instead of the first N
+      minutes of each file.
+- [ ] **Resolved problems in the cutover report** (2 h). Checks that fired in the before
+      file and not in the after file listed as improvements, so a diff run after a fix
+      reads as "fixed" rather than "clean".
+- [ ] **S3 access log cutover checks** (2 h). Errors per prefix, principals newly refused,
+      prefixes whose traffic disappeared, new clients.
+- [ ] **CloudWatch console deep link** (2 h). A link from each finding's query that opens
+      the Logs Insights console with the query, log group and time range filled in; the
+      log group name comes from a per-dataset setting, the region from the file where it
+      has one.
+- [ ] **Athena variants of the queries** (3 h). For the formats that live in S3 (ALB,
+      NLB, S3 access logs, flow logs delivered to S3): the same finding as a SQL query
+      over the documented Athena table layout, next to the Logs Insights one.
+- [ ] **Random sample instead of the head** (3 h). The first N rows of a file are the
+      first N minutes; a reservoir sample across the file would make the quick look
+      representative, at the cost of a full read. Offer it as an option on the first
+      load, keep the head sample as the default because it is fast.
+- [ ] **Profile diff for any format** (3 h). New and missing columns, changed inferred
+      types, and shifted distributions (a column whose top values changed) between two
+      files, as a section of the cutover report that works for generic CSV too.
+- [ ] **Cached findings on disk** (2 h). Store the profile, findings and timeline in the
+      dataset's sidecar after they are computed, invalidated by the row count, so a
+      restart or a second visit does not recompute them for a large file.
+- [ ] **Multi-file datasets** (4 h). Load a directory or a glob as one dataset (a day of
+      hourly flow log files), streaming each file through the same chunked loader and
+      recording which file each row came from.
+- [ ] **Memory limit and cancellation** (2 h). A `--memory-limit` passed to DuckDB and a
+      Cancel button on the progress panel that stops the full pass between chunks.
+- [ ] **PyPI release and a single-file build** (3 h). Publish so `pipx install logsift`
+      works, and a shiv or PyApp build for machines without Python.
 
 ## Packaging
 
