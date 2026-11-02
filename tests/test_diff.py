@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -92,7 +96,7 @@ def test_cutover_pair_finds_the_planted_regressions(pair: tuple[Dataset, Dataset
 
     share = report.change("bad-share")
     assert share is not None and share.verdict == Verdict.REGRESSION
-    assert share.title == "Rejected flows: 7.8% after, 1.6% before (up 4.3x)"
+    assert share.title == "Rejected flows: 7.8% after, 1.6% before (up 4.9x)"
     volume = report.change("volume")
     assert volume is not None and volume.verdict == Verdict.CLEAN
     assert volume.title == "Volume: 73.7 flows a minute after, 82.7 before (down 11%)"
@@ -163,3 +167,141 @@ def test_files_must_share_a_format(
         assert compare(v2, before).alignment.minutes == 60
     finally:
         v2.close()
+
+
+# ----------------------------------------------------------- the other formats
+# Each sample's planted problems sit in its second hour, so the first hour against the
+# second is a cutover that went wrong.
+
+
+def split_sample(name: str, tmp_path: Path) -> tuple[Path, Path]:
+    """The sample's rows before 09:00 and from 09:00 on, as two files of the same shape."""
+    text = (SAMPLES / name).read_text()
+    if name.endswith(".csv"):
+        rows = list(csv.reader(io.StringIO(text)))
+        head, body = rows[0], rows[1:]
+        idx = next(i for i, c in enumerate(head) if c.lower().replace(" ", "") == "eventtime")
+        parts = {
+            "before": [r for r in body if r[idx][11:13] < "09"],
+            "after": [r for r in body if r[idx][11:13] >= "09"],
+        }
+        for part, rs in parts.items():
+            with (tmp_path / f"{part}_{name}").open("w", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(head)
+                w.writerows(rs)
+    else:
+        lines = text.splitlines()
+        stamp = {
+            "alb_access_logs.log": lambda ln: ln.split(" ")[1][11:13],
+            "nlb_access_logs.log": lambda ln: ln.split(" ")[2][11:13],
+            "route53_resolver_query_logs.json": lambda ln: json.loads(ln)["query_timestamp"][11:13],
+        }[name]
+        for part, keep in (("before", lambda h: h < "09"), ("after", lambda h: h >= "09")):
+            chosen = [ln for ln in lines if keep(stamp(ln))]
+            (tmp_path / f"{part}_{name}").write_text("\n".join(chosen) + "\n")
+    return tmp_path / f"before_{name}", tmp_path / f"after_{name}"
+
+
+def diff_sample(name: str, tmp_path: Path):  # noqa: ANN201
+    before_path, after_path = split_sample(name, tmp_path)
+    before, after = Dataset.open(before_path), Dataset.open(after_path)
+    try:
+        report = compare(before, after)
+        for c in report.changes:  # every filter selects what it claims
+            where = c.after_filter if c.evidence == "after" else c.before_filter
+            ds = after if c.evidence == "after" else before
+            if where:
+                assert count(ds, where) == c.rows, c.id
+        return report
+    finally:
+        before.close()
+        after.close()
+
+
+def test_alb_cutover_checks(tmp_path: Path) -> None:
+    report = diff_sample("alb_access_logs.log", tmp_path)
+    assert report.verdict == Verdict.REGRESSION
+    ids = {c.id: c for c in report.changes}
+    assert [c.id for c in report.changes] == [
+        "target-errors",
+        "bad-share",
+        "path-errors",
+        "volume",
+        "latency",
+        "targets",
+    ]
+    t = ids["target-errors"]
+    assert t.verdict == Verdict.REGRESSION and t.after == 393 and t.before == 3
+    assert (
+        t.title == "5xx per target: 10.0.2.11:8080 fails 67.3% of its requests after, 1.2% before"
+    )
+    assert "1 target fails more of its requests" in t.summary
+    assert t.tables[0].rows[0][:3] == ("10.0.2.11:8080", 244, 3) and t.tables[0].rows[0][-1] == (
+        "/api/products"
+    )
+    assert ids["path-errors"].verdict == Verdict.REGRESSION
+    assert ids["path-errors"].tables[0].rows[0] == ("/api/products", 148, 0, 192, 81)
+    assert ids["bad-share"].title == "5xx requests: 18.1% after, 0.4% before (up 51.0x)"
+    assert ids["latency"].verdict == Verdict.CLEAN and ids["latency"].unit == "seconds"
+    assert ids["latency"].tables[0].rows[0] == ("/api/reports/export", 32, 60.0)
+    assert ids["targets"].verdict == Verdict.CLEAN
+    assert report.timeline is not None and report.timeline["good"] == "ok"
+
+
+def test_nlb_cutover_checks(tmp_path: Path) -> None:
+    report = diff_sample("nlb_access_logs.log", tmp_path)
+    assert report.verdict == Verdict.REVIEW
+    ids = {c.id: c for c in report.changes}
+    h = ids["handshakes"]
+    assert h.verdict == Verdict.REVIEW and h.unit == "connections"
+    assert h.title == "Failed handshakes: 192.0.2.80:443 fails 7.9% after, 5.2% before"
+    assert h.tables[0].rows == [("192.0.2.80:443", 1793, 94, 1222, 96)]
+    assert ids["bad-share"].title == "Failed connections: 7.9% after, 5.2% before (up 50%)"
+    assert "not by enough to distrust" in ids["volume"].summary
+    assert ids["targets"].title == "The same targets serve traffic before and after"
+    assert "latency" not in ids and "target-errors" not in ids
+
+
+def test_resolver_cutover_checks(tmp_path: Path) -> None:
+    report = diff_sample("route53_resolver_query_logs.json", tmp_path)
+    assert report.verdict == Verdict.REGRESSION
+    ids = {c.id: c for c in report.changes}
+    f = ids["new-failures"]
+    assert f.verdict == Verdict.REGRESSION and f.after == 671 and f.before == 15
+    assert f.title == (
+        "New failures: 671 NXDOMAIN and other answers for 2 domains that resolved before"
+    )
+    assert "example.internal got 413 NXDOMAIN answers after (15 before) from 6 hosts" in (f.summary)
+    assert f.tables[0].rows[1][:5] == ("in-addr.arpa", "NXDOMAIN", 0, 190, 1)
+    assert ids["blocked"].verdict == Verdict.CLEAN
+    assert ids["blocked"].title == "DNS Firewall blocked 170 queries after, 172 before"
+    assert "The same names were blocked before" in ids["blocked"].summary
+    assert "an improvement" in ids["bad-share"].summary
+    assert (
+        ids["names-gone"].verdict == Verdict.CLEAN and ids["new-talkers"].verdict == Verdict.CLEAN
+    )
+
+
+def test_cloudtrail_cutover_checks(tmp_path: Path) -> None:
+    report = diff_sample("cloudtrail_events.csv", tmp_path)
+    assert report.verdict == Verdict.REGRESSION
+    ids = {c.id: c for c in report.changes}
+    s = ids["service-errors"]
+    assert s.verdict == Verdict.REGRESSION
+    assert s.title == "Errors per service: ssm fails 33.5% of calls after, 5.3% before"
+    assert s.tables[0].rows[0] == ("ssm", 380, 20, 540, 181, "AccessDeniedException")
+    d = ids["new-denials"]
+    assert d.verdict == Verdict.REVIEW and d.after == 181
+    assert "shop-web-role is refused ssm:GetParameter 181 times after" in d.summary
+    assert "an action it did not call before" in d.summary
+    p = ids["principals"]
+    assert (
+        p.verdict == Verdict.REVIEW
+        and p.title == "Principals changed: 2 principals new (backup-admin, root)"
+    )
+    assert [r[0] for r in p.tables[0].rows] == ["backup-admin", "root"]
+    r = ids["regions"]
+    assert r.title == "New regions: ap-southeast-1, us-east-2 with 22 calls after and none before"
+    assert "most often RunInstances" in r.summary
+    assert ids["bad-share"].verdict == Verdict.CLEAN and report.timeline["unit"] == "calls"  # type: ignore[index]

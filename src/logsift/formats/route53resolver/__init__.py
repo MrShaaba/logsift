@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
+from logsift.formats.route53resolver.cutover import dns_cutover_checks, dns_health
 from logsift.formats.route53resolver.findings import build_timeline, run_rules
 from logsift.formats.route53resolver.table import build_dns_table
 from logsift.insights.cwlogs import QuerySpec, boolean, regex_escape
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
+    from logsift.cutover import Change, DiffContext, Health
     from logsift.dataset import Dataset
     from logsift.insights.base import Finding
 
@@ -119,6 +121,7 @@ class Route53ResolverPlugin(FormatPlugin):
     name = "route53_resolver"
     table = "dns"
     dash_means_missing = False
+    time_column = "query_time"
 
     def detect(self, sn: Sniff) -> FormatInfo | None:
         if sn.json_lines:
@@ -153,6 +156,12 @@ class Route53ResolverPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def health(self, columns: set[str]) -> Health | None:
+        return dns_health(columns)
+
+    def cutover_checks(self, ctx: DiffContext) -> list[Change]:
+        return dns_cutover_checks(ctx)
 
     def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
         return QuerySpec(

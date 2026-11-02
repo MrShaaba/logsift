@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, positional
+from logsift.formats.loadbalancer.cutover import lb_cutover_checks, lb_health
 from logsift.formats.loadbalancer.findings import build_timeline, run_rules
 from logsift.formats.loadbalancer.table import build_lb_table
 from logsift.insights.cwlogs import QuerySpec, boolean, like, parse_clause
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
+    from logsift.cutover import Change, DiffContext, Health
     from logsift.dataset import Dataset
     from logsift.insights.base import Finding
 
@@ -190,6 +192,7 @@ class LoadBalancerPlugin(FormatPlugin):
     name = "load_balancer"
     table = "lb"
     dash_means_missing = True
+    time_column = "time"
 
     def detect(self, sn: Sniff) -> FormatInfo | None:
         if sn.has_header or sn.delimiter != " ":
@@ -223,6 +226,12 @@ class LoadBalancerPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def health(self, columns: set[str]) -> Health | None:
+        return lb_health(columns)
+
+    def cutover_checks(self, ctx: DiffContext) -> list[Change]:
+        return lb_cutover_checks(ctx)
 
     def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
         alb = fmt.kind == Format.ALB

@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from logsift.formats.base import Format, FormatInfo, FormatPlugin, mostly, squash
+from logsift.formats.cloudtrail.cutover import trail_cutover_checks, trail_health
 from logsift.formats.cloudtrail.findings import build_timeline, run_rules
 from logsift.formats.cloudtrail.table import GLOBAL_SERVICES, build_trail_table
 from logsift.insights.cwlogs import QuerySpec, boolean, mapped, regex_escape
 from logsift.loader import Sniff
 
 if TYPE_CHECKING:
+    from logsift.cutover import Change, DiffContext, Health
     from logsift.dataset import Dataset
     from logsift.insights.base import Finding
 
@@ -172,6 +174,7 @@ def looks_like_cloudtrail(sn: Sniff, mapping: dict[str, str]) -> bool:
 class CloudTrailPlugin(FormatPlugin):
     name = "cloudtrail"
     table = "trail"
+    time_column = "event_time"
 
     def detect(self, sn: Sniff) -> FormatInfo | None:
         if not sn.has_header:
@@ -197,6 +200,12 @@ class CloudTrailPlugin(FormatPlugin):
 
     def timeline(self, ds: Dataset) -> dict[str, Any] | None:
         return build_timeline(ds)
+
+    def health(self, columns: set[str]) -> Health | None:
+        return trail_health(columns)
+
+    def cutover_checks(self, ctx: DiffContext) -> list[Change]:
+        return trail_cutover_checks(ctx)
 
     def query_spec(self, fmt: FormatInfo) -> QuerySpec | None:
         return QuerySpec(

@@ -252,7 +252,7 @@ def totals_checks(ctx: DiffContext) -> list[Change]:
     elif a_bad >= BAD_MIN_ROWS and growth >= BAD_SHARE_REVIEW:
         verdict = Verdict.REVIEW
         note = f"More of the traffic is {h.bad_label} than before; the checks below say where."
-    elif b_share and a_share <= b_share / 2:
+    elif b_share and a_share <= 0.75 * b_share:
         verdict = Verdict.CLEAN
         note = f"Fewer {h.bad_label} {unit} than before: an improvement."
     else:
@@ -263,7 +263,7 @@ def totals_checks(ctx: DiffContext) -> list[Change]:
             "bad-share",
             "bad_share",
             f"{h.bad_label.capitalize()} {unit}: {pct(a_bad, a_rows)} after, "
-            f"{pct(b_bad, b_rows)} before ({describe_change(b_bad, a_bad)})",
+            f"{pct(b_bad, b_rows)} before ({describe_change(b_share, a_share)})",
             verdict,
             f"{a_bad:,} of {a_rows:,} {unit} were {h.bad_label} after against {b_bad:,} of "
             f"{b_rows:,} before. {note}",
