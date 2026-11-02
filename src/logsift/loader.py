@@ -589,7 +589,9 @@ def load(
         notes.append("File is gzip compressed and was decompressed on the fly.")
     if sn.bom:
         notes.append("File starts with a UTF-8 byte order mark, which was ignored.")
-    if not sn.has_header:
+    if sn.json_lines:
+        notes.append("One JSON object per line, loaded as a single text column named line.")
+    elif not sn.has_header:
         notes.append("No header row detected, so columns are named column_1, column_2 and so on.")
     if len(sn.field_counts) > 1:
         common = sn.field_counts.most_common(1)[0][0]

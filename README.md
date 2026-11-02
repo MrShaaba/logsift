@@ -5,8 +5,11 @@ Drop in a CSV or log file and understand it right away.
 logsift is a small local tool for the moment you open an unfamiliar CSV or log export and
 lose time working out what the columns mean and where the interesting rows are. You drop a
 file in and get a plain-English read of it: what the file is, what each column holds, and,
-for AWS VPC Flow Logs, load balancer access logs, CloudTrail exports and S3 server access
-logs, where traffic is breaking and what looks unusual.
+for AWS VPC Flow Logs, load balancer access logs, CloudTrail exports, S3 server access logs
+and Route 53 Resolver query logs, where traffic is breaking and what looks unusual. Every
+finding comes with the CloudWatch Logs Insights query that finds the same rows in the live
+log group, and findings and rows can be pinned to an investigation with notes and exported
+as one HTML page.
 
 ![logsift showing findings for a VPC Flow Log](docs/screenshot.png)
 
@@ -21,12 +24,15 @@ burst of 5xx, a slow endpoint, rejected TLS handshakes), CloudTrail event export
 being tested against every action it might have, console sign-ins without MFA, root
 activity, instances appearing in a region nobody uses) and S3 server access logs (a public
 prefix being read anonymously, a stranger guessing file names, 404s piling up under one
-prefix after a cleanup, a batch role refused on a schedule).
+prefix after a cleanup, a batch role refused on a schedule) and Route 53 Resolver query
+logs (a host generating names, DNS Firewall blocks, data moving over DNS, an internal zone
+failing to resolve).
 
 ## What it does
 
 - **Loads** comma, tab, semicolon, pipe and space-delimited files, with quoted fields, a
-  byte order mark and gzip. Shows row and column counts and any parse warnings.
+  byte order mark and gzip, and JSON-lines files (one object per line). Shows row and
+  column counts and any parse warnings.
 - **Handles large files**: a file streams into DuckDB chunk by chunk, so one bigger than
   memory still loads, with rows and bytes read shown as it goes. The web UI reads the
   first 250,000 rows for a quick first look and offers a button for the full pass; loaded
@@ -40,9 +46,10 @@ prefix after a cleanup, a batch role refused on a schedule).
   Load Balancer TLS access logs, CloudTrail event exports as CSV (the console's event
   history download, a CloudTrail Lake or Athena result, or a flattened export with columns
   like `userIdentity.type`; header names are matched loosely, so `Event name`, `eventName`
-  and `eventname` all work), and S3 server access logs (the bracketed timestamp and quoted
-  request line, older files with fewer fields included). Each format is a plug-in, see
-  [Adding a format](#adding-a-format).
+  and `eventname` all work), S3 server access logs (the bracketed timestamp and quoted
+  request line, older files with fewer fields included) and Route 53 Resolver query logs
+  (the JSON records Resolver delivers to CloudWatch Logs, S3 or Firehose, or a CSV export
+  of them). Each format is a plug-in, see [Adding a format](#adding-a-format).
 - **Profiles every column**: inferred type, count, missing, distinct, min/max/mean/median,
   earliest/latest for dates, top values and a small histogram, with a short "what this
   file looks like" summary on top.
@@ -96,17 +103,43 @@ prefix after a cleanup, a batch role refused on a schedule).
   - a signed principal refused on a schedule, with the IAM action to grant
   - a burst of deletes by one principal, rated high when the keys were requested afterwards
   - a who-uses-the-bucket overview, and a timeline of requests against errors
+- **Finds problems in Route 53 Resolver query logs** the same way. Each query gets its
+  registrable `domain`, name length and label count, and flags for a failed or a
+  firewall-blocked answer:
+  - names DNS Firewall blocked, by name, host and domain, with the rhythm of the queries
+    (a process on a timer reads differently from a person)
+  - a host getting NXDOMAIN hundreds of times in minutes, told apart as a zone being
+    enumerated (names under one zone, reverse lookups) or a domain generation algorithm
+    (random labels spread across top-level domains)
+  - a host asking for far more different names than the rest of the fleet
+  - possible tunnelling: long, never-repeated labels under one domain, with the bytes
+    carried in questions and answers
+  - SERVFAIL runs per domain, with the forwarding endpoint called out for private zones
+  - an error summary by response code, domain and host, the top clients and names, and a
+    timeline of answered against failed or blocked queries
+- **Gives you the CloudWatch Logs Insights query** for every finding, with a Copy button:
+  the finding's own row filter translated into the log group's field names, the time
+  window in a comment for the console's time picker, and a `stats` clause for the
+  aggregate rules. See [Logs Insights queries](#logs-insights-queries).
+- **Keeps investigations**: pin findings and individual rows from any loaded file, add
+  notes, and export the lot as one self-contained HTML page. Saved under
+  `data/investigations/`. See [Investigations](#investigations).
 - **Explores** rows in a paginated table with search, a column filter and sorting, and a
   click from any finding straight to its rows.
 - **Exports** findings and filtered rows as CSV, JSON and `.xlsx` (bold frozen header, real
   number and date cells, auto-sized columns).
-- **Writes a self-contained HTML report** from the command line.
+- **Writes a self-contained HTML report** from the command line, for a file or for an
+  investigation.
 
 ![logsift showing findings for an ALB access log](docs/screenshot-alb.png)
 
 ![logsift showing findings for a CloudTrail export](docs/screenshot-cloudtrail.png)
 
 ![logsift showing findings for an S3 server access log](docs/screenshot-s3.png)
+
+![logsift showing findings for a Route 53 Resolver query log](docs/screenshot-route53.png)
+
+![an investigation with a pinned finding, a pinned row and notes](docs/screenshot-investigation.png)
 
 Everything runs locally. Nothing is uploaded, there is no telemetry, no accounts and no
 cloud resources. Findings are rules, not models.
@@ -126,6 +159,9 @@ uv run logsift serve --open          # web UI at http://127.0.0.1:8000
 uv run logsift serve samples/vpc_flow_logs_custom_v5.log   # start with a file loaded
 uv run logsift report samples/vpc_flow_logs_v2.log         # writes samples/vpc_flow_logs_v2.report.html
 uv run logsift inspect samples/cloudtrail_events.csv -v    # summary and findings in the terminal
+uv run logsift inspect samples/s3_access_logs.log --queries  # with the Logs Insights query per finding
+uv run logsift investigations                              # list the saved investigations
+uv run logsift report --investigation "Blocked replies"    # export one as HTML
 ```
 
 In the browser, drag a file onto the drop zone or pick one. Uploaded files are kept under
@@ -176,11 +212,63 @@ database security group refusing 5432, a web host pushing tens of gigabytes to o
 address, a thousand-port sweep at 10:00, SYN-only flows, NODATA and SKIPDATA records and a
 twenty minute gap at 13:00.
 
+## Logs Insights queries
+
+Every finding carries the CloudWatch Logs Insights query that selects the same rows in
+the live log group, under a "CloudWatch Logs Insights query" panel on the finding card
+with a Copy button (in the web UI and in the HTML report), under `logsift inspect
+--queries`, and as a `query` column in the findings exports.
+
+The query is not written by hand per rule. A finding's row filter is a plain SQL boolean
+over the format's canonical table, so `insights/cwlogs.py` parses that small SQL subset
+and prints it back in the Logs Insights language, and each plug-in says how its columns
+map onto a log group through a `QuerySpec`:
+
+- the Logs Insights field for each column (`srcaddr` is `srcAddr` in a flow log group,
+  `event_name` is `eventName` in a trail's, `instance_id` is `srcids.instance` in a
+  Resolver's);
+- how the derived columns the table builder invented read as real fields: `is_error`
+  becomes `http_status >= 400`, `client_ip = '198.51.100.77'` becomes
+  `client like /^198\.51\.100\.77:/`, a CloudTrail `principal` becomes a match on
+  `userIdentity.arn`;
+- which columns are the time axis: conditions on them are lifted out of the filter into
+  a comment, because the console has a time picker for that;
+- a `parse @message` clause when CloudWatch does not discover the fields itself: custom
+  flow-log formats (parsed in the file's own field order), and ALB, NLB and S3 lines,
+  which are delivered to S3 rather than CloudWatch Logs and get a note saying so;
+- a `stats` clause for the aggregate rules (a rejected cluster by source, a denied burst
+  by action and error code, missing keys by key) instead of a row listing.
+
+Anything the language cannot express (a derived `total_time`, a `tcp_flags` bit test
+beyond the SYN-only case, a column with no CloudWatch counterpart) is dropped from an
+`and` with a comment saying the query returns more rows than the finding, so what remains
+still runs. The queries are produced from the documented field names and were not run
+against a live log group; treat the first one from a new format as something to check.
+
+## Investigations
+
+Pin a finding from the overview, or a row from the explorer, and it lands in the active
+investigation (the picker above the findings and the rows chooses which one receives
+pins, or makes a new one; the first pin creates one when there is none). An investigation
+holds free-text notes, the pinned findings rendered by the same card as on the overview
+(tables and Logs Insights query included), and the pinned rows per file, each with a note
+of its own. "Export as HTML" writes the whole thing as one self-contained page, the same
+output `logsift report --investigation NAME` gives on the command line, and `logsift
+investigations` lists what is saved.
+
+A pin is a snapshot: the finding's text, tables (first ten rows each), filter and query,
+or the row's values, so an investigation still reads after the file it came from is
+closed, reloaded or replaced. Each investigation is one JSON file under
+`data/investigations/`, written atomically. Rows can be pinned from any table with row
+numbers, which is every recognised format; a generic file's rows have no stable identity
+yet.
+
 ## Sample data
 
 `samples/` holds fictional files produced by `scripts/generate_samples.py` (seeded, so the
-output is reproducible). The flow logs, load balancer logs, CloudTrail export and S3 access
-log cover the same two hour window and have known problems planted in them:
+output is reproducible). The flow logs, load balancer logs, CloudTrail export, S3 access
+log and Resolver query log cover the same two hour window and have known problems planted
+in them:
 
 | Problem | Where to look |
 | --- | --- |
@@ -206,6 +294,11 @@ log cover the same two hour window and have known problems planted in them:
 | `bob` deleting three hundred thumbnails with the CLI while the shop still links to them | "bob deleted 300 objects in 3 minutes", "478 requests for objects that do not exist under images/thumbs/" |
 | `shop-reports-role` missing permission on `exports/finance/` and retrying every five minutes | "shop-reports-role was refused 72 requests under exports/finance/" |
 | An upload spike throttled with 503 SlowDown | "By status and error code" table under "625 requests failed" |
+| `10.0.2.11` walking through 1,500 algorithmically generated names under `.example`, `.test` and `.invalid` | "10.0.2.11 got NXDOMAIN for 1,490 different names in 14 minutes" |
+| The bastion `10.0.0.5` looking up every `host-N.corp.example.internal` and the reverse records for `10.0.1.0/24` | "10.0.0.5 got NXDOMAIN for 590 different names in 10 minutes" |
+| `10.0.1.11` asking for `c2.bad.example` and friends every twenty seconds, all day, blocked by DNS Firewall | "DNS Firewall blocked 342 queries for 3 names under bad.example" |
+| `10.0.2.10` moving data in 700 TXT queries with 48-character labels under `dns.example.net` | "Possible DNS tunnel" |
+| Six minutes of SERVFAIL for `corp.example.internal` while the outbound endpoint was down | "SERVFAIL for 68 queries under example.internal over 6 minutes" |
 
 Addresses come from the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
 203.0.113.0/24) and private 10.x space, and the account is the example `123456789012`.
@@ -213,7 +306,11 @@ The load balancer logs use `shop.example.com` and `api.example.com`. The CloudTr
 uses the documentation access key ids (`AKIAIOSFODNN7EXAMPLE` and friends) and carries the
 full event record in its last column, the way the console's CSV download does. The S3 log
 is for a bucket called `shop-assets-example`, with presigned URLs signed by those same
-example keys. `daily_sales.csv` is a generic CSV for a made-up coffee shop.
+example keys. The Resolver log comes as the JSON lines Resolver writes
+(`route53_resolver_query_logs.json`) and as a one-hour CSV export of the same records; its
+names stay under `example.com`, `example.net`, `example.org`, `corp.example.internal`, the
+reserved `.example`, `.test` and `.invalid` top-level domains, and `amazonaws.com`.
+`daily_sales.csv` is a generic CSV for a made-up coffee shop.
 
 Regenerate with `uv run python scripts/generate_samples.py`.
 
@@ -230,8 +327,8 @@ Layout:
 
 ```
 src/logsift/
-  loader.py         delimiter and header sniffing, chunked typed loading into DuckDB with
-                    progress and a resumable row limit, parse warnings
+  loader.py         delimiter, header and JSON-lines sniffing, chunked typed loading into
+                    DuckDB with progress and a resumable row limit, parse warnings
   store.py          one DuckDB file and one JSON sidecar per loaded dataset under data/db/
   formats/          one plug-in per format
     base.py         Format, FormatInfo and the FormatPlugin interface
@@ -241,17 +338,21 @@ src/logsift/
     loadbalancer/   ALB and NLB access logs
     cloudtrail/     CloudTrail event exports
     s3access/       S3 server access logs
-                    each with __init__.py (detector), table.py (typed table), findings.py (rules)
+    route53resolver/ Route 53 Resolver query logs, JSON lines and CSV
+                    each with __init__.py (detector and QuerySpec), table.py (typed table),
+                    findings.py (rules)
   insights/base.py  Finding, Severity and Table, and the text helpers the rules share
+  insights/cwlogs.py the SQL-to-Logs-Insights translator and QuerySpec
+  investigations.py pins, notes and the JSON store under data/investigations/
   sql.py            identifier and literal quoting
   dataset.py        a loaded file: connection, format, table, profile, findings, the sample
                     and the background full pass, saving to and restoring from the store
   profile.py        per-column profile and the plain-English summary
   explore.py        paginated search and filter queries
   export.py         CSV, JSON and .xlsx writers
-  report.py         self-contained HTML report
+  report.py         self-contained HTML report, for a file or an investigation
   web/              FastAPI app, Jinja2 templates, vendored HTMX and CSS
-  cli.py            logsift serve | report | inspect
+  cli.py            logsift serve | report | inspect | investigations
 scripts/generate_samples.py        the fictional samples, seeded
 scripts/generate_big_flow_log.py   a multi-million-row flow log on demand, seeded, never committed
 samples/
@@ -271,6 +372,9 @@ behind one small interface, `FormatPlugin` in `formats/base.py`:
   that table.
 - `findings(ds)` and `timeline(ds)` run plain SQL over that table and return `Finding`
   objects and a good-against-bad series.
+- `query_spec(fmt)` (optional) returns a `QuerySpec` naming the CloudWatch field for each
+  column, so every finding gets its Logs Insights query for free; leave it out for a
+  format that never reaches CloudWatch.
 
 Set `name`, `table` and `dash_means_missing` on the class, register an instance in
 `PLUGINS` in `formats/__init__.py`, and that is all: `Dataset` finds the plug-in by name.

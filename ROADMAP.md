@@ -25,8 +25,16 @@ are done; everything else is not started.
       Not covered yet: telling CloudFront origin requests from other callers, access
       point and website endpoint specifics (the columns are kept, no rules use them),
       isolating the hot key prefix behind 503 SlowDown, and bytes per prefix over time
-- [ ] Route 53 Resolver query logs (JSON lines and CSV; findings for NXDOMAIN bursts and
-      one client querying many names)
+- [x] Route 53 Resolver query logs (JSON lines and CSV; findings for NXDOMAIN bursts and
+      one client querying many names). Done in `formats/route53resolver/` with the samples
+      `route53_resolver_query_logs.json` and `.csv`, plus DNS Firewall blocks, possible
+      tunnelling, SERVFAIL runs and an error overview; the loader learned JSON lines for
+      it. Not covered yet: the Firehose and S3 deliveries that gzip several records per
+      object with no newline between them, telling a resolver or proxy host (which
+      legitimately asks for many names) from an enumerating one by anything but the
+      number of names, DNS Firewall ALERT and OVERRIDE actions as their own finding, and
+      a `search path` heuristic (NXDOMAIN for `name.corp.example.internal` right before
+      NOERROR for `name.example.com` is a client appending suffixes, not malware)
 - [x] A format plug-in interface so each format ships its own detector, canonical table
       builder and rule set. `FormatPlugin` in `formats/base.py`, one sub-package per
       format, an ordered registry in `formats/__init__.py`. Not covered yet: discovering
@@ -62,16 +70,33 @@ are done; everything else is not started.
 
 ## Saved investigations
 
-- [ ] Pin findings and individual rows to an investigation
-- [ ] Add free-text notes to pinned items
-- [ ] Save investigations locally (SQLite or JSON under `data/`)
-- [ ] Export an investigation as a self-contained HTML report, reusing `logsift report`
+- [x] Pin findings and individual rows to an investigation. Pin buttons on every finding
+      card and every row in the explorer, a picker for which investigation receives pins.
+      Not covered yet: pinning a row of a generic file (its table has no row numbers), a
+      pin that remembers the search or filter it came from, and pinning a whole filtered
+      view rather than one row at a time
+- [x] Add free-text notes to pinned items, and to the investigation itself
+- [x] Save investigations locally (JSON under `data/investigations/`, one file each,
+      written atomically). Not covered yet: refreshing a pinned finding from a reloaded
+      file (a pin is a snapshot on purpose), and a version bump path for the JSON beyond
+      "unreadable files are skipped"
+- [x] Export an investigation as a self-contained HTML report, from the page and with
+      `logsift report --investigation`. Not covered yet: a PDF, and exporting the pinned
+      rows as CSV or .xlsx
 
 ## CloudWatch Logs Insights query box
 
-- [ ] Turn a finding into the matching Logs Insights query (rejected cluster, asymmetric
-      pair, port sweep, top talker) with the right field names for the log group's format
-- [ ] Copy-to-clipboard button and a deep link that pre-fills the CloudWatch console
+- [x] Turn a finding into the matching Logs Insights query (rejected cluster, asymmetric
+      pair, port sweep, top talker) with the right field names for the log group's format.
+      Done for every finding of every format by translating the finding's row filter
+      (`insights/cwlogs.py`) with a per-format `QuerySpec`. Not covered yet: running the
+      queries against a real log group (they follow the documented field names and the
+      Logs Insights syntax guide, nothing more), the `tcp_flags` bit tests beyond the
+      SYN-only case, an Athena SQL variant for the formats that live in S3 (ALB, NLB, S3
+      access logs), and the CloudTrail `principal` for AWS service principals
+- [x] Copy-to-clipboard button (the clipboard API, falling back to selecting the text)
+- [ ] A deep link that pre-fills the CloudWatch console with the query, the log group and
+      the time range
 
 ## Diffing two files
 
